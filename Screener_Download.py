@@ -8,19 +8,27 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 
-def download_screener_excel(ticker: str, email: str, password: str, download_path: str):
+def download_financial_data(ticker: str, email: str, password: str, download_path: str):
     """
-    Logs into screener.in using Selenium and downloads the financial data Excel file.
+    Logs into screener.in, downloads the Excel data sheet, and then downloads
+    the latest Annual Report PDF.
 
     Args:
         ticker (str): The stock ticker of the company (e.g., "CUPID").
         email (str): Your screener.in login email.
         password (str): Your screener.in login password.
-        download_path (str): The absolute local folder path to save the downloaded file.
+        download_path (str): The absolute local folder path to save the downloaded files.
     """
-    # --- Setup Chrome options to specify download folder ---
+    # --- Setup Chrome options ---
     chrome_options = webdriver.ChromeOptions()
-    prefs = {"download.default_directory": download_path}
+    
+    # --- THIS IS THE FIX ---
+    # Add prefs to disable the PDF viewer and force downloads.
+    prefs = {
+        "download.default_directory": download_path,
+        "plugins.always_open_pdf_externally": True,
+        "download.prompt_for_download": False
+    }
     chrome_options.add_experimental_option("prefs", prefs)
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--window-size=1920,1080")
@@ -31,83 +39,90 @@ def download_screener_excel(ticker: str, email: str, password: str, download_pat
         print("Setting up Chrome WebDriver (Headless Mode)...")
         service = ChromeService(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
-        
-        # --- 1. Navigate to login page ---
+        wait = WebDriverWait(driver, 20)
+
+        # --- 1. Login ---
         print("Navigating to login page...")
         driver.get("https://www.screener.in/login/")
-
-        # --- 2. Wait for the login form, then enter credentials and submit ---
-        print("Waiting for the login form to be ready...")
-        wait = WebDriverWait(driver, 20)
         
         username_field = wait.until(EC.presence_of_element_located((By.ID, "id_username")))
         password_field = wait.until(EC.presence_of_element_located((By.ID, "id_password")))
         login_button = wait.until(EC.presence_of_element_located((By.XPATH, "//button[@type='submit']")))
 
-        print(f"Login form ready. Attempting to log in as {email}...")
+        print(f"Attempting to log in as {email}...")
         username_field.send_keys(email)
         password_field.send_keys(password)
         login_button.click()
-        
-        # --- 3. Add a short pause to allow the post-login redirect to complete ---
-        print("Pausing for 3 seconds to allow dashboard to load...")
-        time.sleep(3)
+        time.sleep(3) # Pause for post-login redirect
 
-        # --- 4. THIS IS THE FIX: Navigate directly to the CONSOLIDATED company page ---
+        # --- 2. Navigate to Company Page ---
         company_url = f"https://www.screener.in/company/{ticker}/consolidated/"
         print(f"Navigating to {ticker}'s consolidated page...")
         driver.get(company_url)
 
-        # --- 5. Wait for the 'Export to Excel' button to be present ---
-        print("Waiting for the 'Export to Excel' button to be present on the page...")
+        # --- 3. Initiate Excel Download ---
+        print("Locating 'Export to Excel' button...")
         export_button_locator = (By.XPATH, "//button[.//span[contains(text(), 'Export to Excel')]]")
+        export_button = wait.until(EC.element_to_be_clickable(export_button_locator))
         
-        export_button = wait.until(EC.presence_of_element_located(export_button_locator))
-        
-        print("Login successful and page ready! Found 'Export to Excel' button.")
-        
-        # --- 6. Scroll the button into view ---
-        print("Scrolling the button into view...")
-        driver.execute_script("arguments[0].scrollIntoView(true);", export_button)
-        time.sleep(1)
-
-        # --- 7. FINAL ROBUST DOWNLOAD LOGIC ---
         files_before = set(os.listdir(download_path))
-        
-        print("Clicking to download using JavaScript...")
+        print("Initiating Excel download...")
         driver.execute_script("arguments[0].click();", export_button)
+        time.sleep(2) # Short pause to ensure download is initiated
 
-        print(f"Waiting for download to complete...")
-        wait_time = 30
-        download_complete = False
+        # --- 4. Initiate Annual Report PDF Download ---
+        print("Navigating to 'Documents' tab...")
+        documents_tab_locator = (By.LINK_TEXT, "Documents")
+        documents_tab = wait.until(EC.element_to_be_clickable(documents_tab_locator))
+        driver.execute_script("arguments[0].click();", documents_tab)
+
+        print("Locating latest Annual Report link...")
+        # This XPath finds the H3 tag for "Annual reports", then finds the first link in the first div that follows it.
+        annual_report_link_locator = (By.XPATH, "//h3[text()='Annual reports']/following-sibling::div[1]//a[1]")
+        annual_report_link = wait.until(EC.element_to_be_clickable(annual_report_link_locator))
+        
+        print("Initiating Annual Report PDF download...")
+        driver.execute_script("arguments[0].click();", annual_report_link)
+
+        # --- 5. Wait for Both Downloads to Complete ---
+        print("Waiting for both downloads to complete...")
+        wait_time = 60
+        excel_file_path = None
+        pdf_file_path = None
+
         for i in range(wait_time):
             files_after = set(os.listdir(download_path))
             new_files = files_after - files_before
-            
-            # Find the new file that is a completed excel file
-            final_files = [f for f in new_files if f.endswith('.xlsx')]
 
-            if final_files:
-                downloaded_file = final_files[0]
-                downloaded_file_path = os.path.join(download_path, downloaded_file)
-                
-                # Wait a moment to ensure the file is fully written
-                time.sleep(2)
-                
-                # Rename the file to the expected ticker name for consistency
-                new_file_path = os.path.join(download_path, f"{ticker}.xlsx")
-                if os.path.exists(new_file_path):
-                    os.remove(new_file_path)
-                os.rename(downloaded_file_path, new_file_path)
-                
-                print(f"Download complete! File saved as: {new_file_path}")
-                download_complete = True
+            for file in new_files:
+                # Check for completed Excel file
+                if file.endswith('.xlsx') and not file.endswith('.crdownload') and not excel_file_path:
+                    temp_path = os.path.join(download_path, file)
+                    excel_file_path = os.path.join(download_path, f"{ticker}.xlsx")
+                    if os.path.exists(excel_file_path):
+                        os.remove(excel_file_path)
+                    os.rename(temp_path, excel_file_path)
+                    print(f"SUCCESS: Excel file saved as: {excel_file_path}")
+
+                # Check for completed PDF file
+                if (file.endswith('.pdf') or file.endswith('.PDF')) and not file.endswith('.crdownload') and not pdf_file_path:
+                    temp_path = os.path.join(download_path, file)
+                    pdf_file_path = os.path.join(download_path, f"{ticker}_Annual_Report.pdf")
+                    if os.path.exists(pdf_file_path):
+                        os.remove(pdf_file_path)
+                    os.rename(temp_path, pdf_file_path)
+                    print(f"SUCCESS: PDF file saved as: {pdf_file_path}")
+            
+            if excel_file_path and pdf_file_path:
+                print("All downloads complete!")
                 break
             
             time.sleep(1)
-        
-        if not download_complete:
-            print(f"Download failed. No new .xlsx file detected after {wait_time} seconds.")
+
+        if not excel_file_path:
+            print(f"ERROR: Excel download failed after {wait_time} seconds.")
+        if not pdf_file_path:
+            print(f"ERROR: PDF download failed after {wait_time} seconds.")
 
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
@@ -132,4 +147,4 @@ if __name__ == '__main__':
         print("Please create a .env file with SCREENER_EMAIL and SCREENER_PASSWORD.")
         print("="*60)
     else:
-        download_screener_excel(COMPANY_TICKER, SCREENER_EMAIL, SCREENER_PASSWORD, DOWNLOAD_DIRECTORY)
+        download_financial_data(COMPANY_TICKER, SCREENER_EMAIL, SCREENER_PASSWORD, DOWNLOAD_DIRECTORY)
