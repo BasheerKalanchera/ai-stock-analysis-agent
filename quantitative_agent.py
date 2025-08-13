@@ -28,15 +28,14 @@ def read_and_parse_data_sheet(excel_path: str):
         report_date_indices = df[df.iloc[:, 0].astype(str).str.contains('Report Date', na=False)].index
         if len(report_date_indices) < 2:
             print("Error: Could not find both annual and quarterly 'Report Date' rows.")
-            return None, None, None, None, None
+            return None, None, None, None
 
         annual_headers_row_index = report_date_indices[0]
         quarterly_headers_row_index = report_date_indices[1]
 
         # Extract and format headers.
         annual_headers = format_headers(df.iloc[annual_headers_row_index, :].tolist())
-        quarterly_headers = format_headers(df.iloc[quarterly_headers_row_index, :].tolist())
-
+        
         # Find the start and end rows for each financial statement section.
         pnl_start_row = df[df.iloc[:, 0].astype(str).str.contains('PROFIT & LOSS', na=False)].index[0]
         balance_sheet_start_row = df[df.iloc[:, 0].astype(str).str.contains('BALANCE SHEET', na=False)].index[0]
@@ -45,7 +44,6 @@ def read_and_parse_data_sheet(excel_path: str):
 
         # Extract the dataframes for each statement with corrected slicing.
         annual_pnl_df = df.iloc[pnl_start_row + 2 : quarterly_headers_row_index, :].copy()
-        quarterly_pnl_df = df.iloc[quarterly_headers_row_index + 1 : balance_sheet_start_row - 1, :].copy()
         balance_sheet_df = df.iloc[balance_sheet_start_row + 2 : cash_flow_start_row - 1, :].copy()
         cash_flow_df = df.iloc[cash_flow_start_row + 2 : price_row_index, :].copy()
 
@@ -57,21 +55,19 @@ def read_and_parse_data_sheet(excel_path: str):
             return dataframe
 
         annual_pnl_df = process_df(annual_pnl_df, annual_headers)
-        quarterly_pnl_df = process_df(quarterly_pnl_df, quarterly_headers)
         balance_sheet_df = process_df(balance_sheet_df, annual_headers)
         cash_flow_df = process_df(cash_flow_df, annual_headers)
 
-        return annual_pnl_df, quarterly_pnl_df, balance_sheet_df, cash_flow_df, None
+        return annual_pnl_df, balance_sheet_df, cash_flow_df
 
     except Exception as e:
         print(f"Error parsing 'Data Sheet': {e}")
-        return None, None, None, None, None
+        return None, None, None
 
 def call_gemini_api(pnl_data: str, balance_sheet_data: str, cash_flow_data: str, ticker: str):
     """
     Sends the financial data to the Gemini API and returns the analysis.
     """
-    # Using the standard GOOGLE_API_KEY name now
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
         return "Error: GOOGLE_API_KEY not found in .env file."
@@ -117,10 +113,6 @@ def call_gemini_api(pnl_data: str, balance_sheet_data: str, cash_flow_data: str,
 
         Present your analysis in a clear, structured format using markdown.
         """
-
-        print("\n" + "="*50)
-        print("CALLING GEMINI API FOR ANALYSIS...")
-        print("="*50)
         
         response = model.generate_content(prompt)
         
@@ -133,14 +125,15 @@ def call_gemini_api(pnl_data: str, balance_sheet_data: str, cash_flow_data: str,
 def analyze_financials(excel_path: str, ticker: str):
     """
     Reads, parses, and sends financial data for AI analysis.
+    This function is now designed to be called by other scripts (like a Streamlit app).
     """
     try:
-        # Use the new parsing function
-        annual_pnl_df, _, balance_sheet_df, cash_flow_df, _ = read_and_parse_data_sheet(excel_path)
+        annual_pnl_df, balance_sheet_df, cash_flow_df = read_and_parse_data_sheet(excel_path)
 
         if annual_pnl_df is None or balance_sheet_df is None or cash_flow_df is None:
-            print("Could not parse one or more essential financial statements. Aborting analysis.")
-            return
+            error_message = "Could not parse one or more essential financial statements. Aborting analysis."
+            print(error_message)
+            return error_message
 
         # --- Call the Gemini API with the parsed data ---
         analysis_result = call_gemini_api(
@@ -150,19 +143,28 @@ def analyze_financials(excel_path: str, ticker: str):
             ticker
         )
 
-        print("\n--- QUANTITATIVE ANALYSIS REPORT ---")
-        print(analysis_result)
+        # --- THIS IS THE KEY CHANGE ---
+        # Instead of printing, we return the result for the app to display.
+        return analysis_result
 
     except FileNotFoundError:
-        print(f"Error: The file was not found at {excel_path}")
+        error_message = f"Error: The file was not found at {excel_path}"
+        print(error_message)
+        return error_message
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        error_message = f"An unexpected error occurred: {e}"
+        print(error_message)
+        return error_message
 
 
 if __name__ == '__main__':
+    # This block allows the script to be run directly for testing
     load_dotenv()
     TICKER = "CUPID"
     DOWNLOAD_FOLDER = "downloads"
     file_path = os.path.join(os.getcwd(), DOWNLOAD_FOLDER, f"{TICKER}.xlsx")
 
-    analyze_financials(file_path, TICKER)
+    # When run directly, it will print the report to the console
+    report = analyze_financials(file_path, TICKER)
+    print("\n--- QUANTITATIVE ANALYSIS REPORT ---")
+    print(report)

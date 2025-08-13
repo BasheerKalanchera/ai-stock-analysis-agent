@@ -22,14 +22,13 @@ def download_screener_excel(ticker: str, email: str, password: str, download_pat
     chrome_options = webdriver.ChromeOptions()
     prefs = {"download.default_directory": download_path}
     chrome_options.add_experimental_option("prefs", prefs)
-    # To run without opening a browser window, uncomment the following lines
-    # chrome_options.add_argument("--headless")
-    # chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--window-size=1920,1080")
 
     # --- Initialize WebDriver ---
     driver = None
     try:
-        print("Setting up Chrome WebDriver...")
+        print("Setting up Chrome WebDriver (Headless Mode)...")
         service = ChromeService(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
         
@@ -39,7 +38,7 @@ def download_screener_excel(ticker: str, email: str, password: str, download_pat
 
         # --- 2. Wait for the login form, then enter credentials and submit ---
         print("Waiting for the login form to be ready...")
-        wait = WebDriverWait(driver, 20) # Increased wait time
+        wait = WebDriverWait(driver, 20)
         
         username_field = wait.until(EC.presence_of_element_located((By.ID, "id_username")))
         password_field = wait.until(EC.presence_of_element_located((By.ID, "id_password")))
@@ -54,58 +53,61 @@ def download_screener_excel(ticker: str, email: str, password: str, download_pat
         print("Pausing for 3 seconds to allow dashboard to load...")
         time.sleep(3)
 
-        # --- 4. Navigate directly to the company page ---
-        company_url = f"https://www.screener.in/company/{ticker}/"
-        print(f"Navigating to {ticker}'s page...")
+        # --- 4. THIS IS THE FIX: Navigate directly to the CONSOLIDATED company page ---
+        company_url = f"https://www.screener.in/company/{ticker}/consolidated/"
+        print(f"Navigating to {ticker}'s consolidated page...")
         driver.get(company_url)
 
-        # --- 5. Wait for the 'Export to Excel' button to be visible and clickable ---
-        print("Waiting for the 'Export to Excel' button to be visible and clickable...")
-
-        export_button_locator = (
-            By.XPATH, "//button[.//span[contains(text(), 'Export to Excel')]]"
-        )
-
-        export_button = wait.until(
-            EC.element_to_be_clickable(export_button_locator)
-        )
-        driver.execute_script("arguments[0].scrollIntoView(true);", export_button)
-        time.sleep(0.5)
-        driver.execute_script("arguments[0].click();", export_button)
+        # --- 5. Wait for the 'Export to Excel' button to be present ---
+        print("Waiting for the 'Export to Excel' button to be present on the page...")
+        export_button_locator = (By.XPATH, "//button[.//span[contains(text(), 'Export to Excel')]]")
+        
+        export_button = wait.until(EC.presence_of_element_located(export_button_locator))
         
         print("Login successful and page ready! Found 'Export to Excel' button.")
         
         # --- 6. Scroll the button into view ---
         print("Scrolling the button into view...")
         driver.execute_script("arguments[0].scrollIntoView(true);", export_button)
-        time.sleep(1) # Add a small pause after scrolling
+        time.sleep(1)
 
-        # --- 7. Use a JavaScript click for maximum reliability ---
+        # --- 7. FINAL ROBUST DOWNLOAD LOGIC ---
+        files_before = set(os.listdir(download_path))
+        
         print("Clicking to download using JavaScript...")
         driver.execute_script("arguments[0].click();", export_button)
 
-        # --- 8. Robust wait for the download to complete ---
-        print(f"Waiting for download to start and complete...")
-        expected_filename = f"{ticker}.xlsx"
-        downloaded_file_path = os.path.join(download_path, expected_filename)
-        
-        wait_time = 30  # Max wait time in seconds
+        print(f"Waiting for download to complete...")
+        wait_time = 30
         download_complete = False
         for i in range(wait_time):
-            if os.path.exists(downloaded_file_path):
-                initial_size = os.path.getsize(downloaded_file_path)
-                if initial_size > 0:
-                    time.sleep(2) 
-                    final_size = os.path.getsize(downloaded_file_path)
-                    if initial_size == final_size:
-                        print(f"Download complete! File saved at: {downloaded_file_path}")
-                        download_complete = True
-                        break 
+            files_after = set(os.listdir(download_path))
+            new_files = files_after - files_before
+            
+            # Find the new file that is a completed excel file
+            final_files = [f for f in new_files if f.endswith('.xlsx')]
+
+            if final_files:
+                downloaded_file = final_files[0]
+                downloaded_file_path = os.path.join(download_path, downloaded_file)
+                
+                # Wait a moment to ensure the file is fully written
+                time.sleep(2)
+                
+                # Rename the file to the expected ticker name for consistency
+                new_file_path = os.path.join(download_path, f"{ticker}.xlsx")
+                if os.path.exists(new_file_path):
+                    os.remove(new_file_path)
+                os.rename(downloaded_file_path, new_file_path)
+                
+                print(f"Download complete! File saved as: {new_file_path}")
+                download_complete = True
+                break
+            
             time.sleep(1)
         
         if not download_complete:
-            print(f"Download failed. File not found or did not finish downloading after {wait_time} seconds.")
-
+            print(f"Download failed. No new .xlsx file detected after {wait_time} seconds.")
 
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
@@ -115,17 +117,10 @@ def download_screener_excel(ticker: str, email: str, password: str, download_pat
             driver.quit()
 
 if __name__ == '__main__':
-    # --- Load environment variables from .env file ---
     load_dotenv()
-
-    # --- Get credentials from environment variables ---
     SCREENER_EMAIL = os.getenv("SCREENER_EMAIL")
     SCREENER_PASSWORD = os.getenv("SCREENER_PASSWORD")
-    
-    # --- Company to download ---
     COMPANY_TICKER = "CUPID"
-    
-    # --- Set an absolute path for the download directory ---
     DOWNLOAD_DIRECTORY = os.path.join(os.getcwd(), "downloads")
     
     if not os.path.exists(DOWNLOAD_DIRECTORY):
