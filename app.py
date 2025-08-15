@@ -2,84 +2,86 @@
 import os
 from dotenv import load_dotenv
 
-# --- Import Functions from Your Agent Scripts ---
-# We assume these files are in the same directory
-from Screener_Download import download_screener_excel
-from quantitative_agent import analyze_financials
+# Import Agent Functions
+from Screener_Download import download_financial_data
+from qualitative_agent import process_annual_report, answer_qualitative_question
 
-# --- Page Configuration ---
-st.set_page_config(
-    page_title="AI Stock Analysis Agent",
-    page_icon="🤖",
-    layout="wide"
-)
-
-# --- Load Environment Variables ---
+st.set_page_config(page_title="AI Stock Analysis Agent", page_icon="🤖", layout="wide")
 load_dotenv()
 
-# --- Main App Interface ---
-st.title("🤖 AI Stock Analysis Agent")
-st.markdown("This app uses a team of AI agents to perform a quantitative analysis of a stock.")
+st.title("🤖 AI Stock Analysis Crew")
+st.markdown("Enter a stock ticker to analyze its Annual Report.")
 
-# --- User Input ---
+# --- Session State Initialization ---
+if 'ticker' not in st.session_state:
+    st.session_state.ticker = ""
+if 'report_data' not in st.session_state:
+    st.session_state.report_data = None
+# NEW: Initialize chat history
+if 'messages' not in st.session_state:
+    st.session_state.messages = []
+
+# --- Sidebar Controls ---
 st.sidebar.header("Controls")
-ticker = st.sidebar.text_input("Enter Stock Ticker (e.g., CUPID, RELIANCE)", value="CUPID")
-analyze_button = st.sidebar.button("Analyze Stock", type="primary")
+ticker_input = st.sidebar.text_input("Enter Stock Ticker", value="DOMS")
 
-# --- Main Logic ---
-if analyze_button:
-    # --- Validate Inputs ---
-    if not ticker:
+if st.sidebar.button("Analyze Stock", type="primary"):
+    st.session_state.ticker = ticker_input
+    # Clear previous analysis and chat history
+    st.session_state.report_data = None
+    st.session_state.messages = []
+    
+    if not st.session_state.ticker:
         st.error("Please enter a stock ticker.")
     else:
-        # --- Setup Paths and Credentials ---
+        # --- Run Analysis Pipeline ---
         SCREENER_EMAIL = os.getenv("SCREENER_EMAIL")
         SCREENER_PASSWORD = os.getenv("SCREENER_PASSWORD")
-        GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
         DOWNLOAD_DIRECTORY = os.path.join(os.getcwd(), "downloads")
-        
-        if not os.path.exists(DOWNLOAD_DIRECTORY):
-            os.makedirs(DOWNLOAD_DIRECTORY)
 
-        # --- Check for Credentials ---
-        if not SCREENER_EMAIL or not SCREENER_PASSWORD or not GOOGLE_API_KEY:
-            st.error("One or more required credentials (SCREENER_EMAIL, SCREENER_PASSWORD, GOOGLE_API_KEY) are missing from your .env file.")
+        if not os.path.exists(DOWNLOAD_DIRECTORY): os.makedirs(DOWNLOAD_DIRECTORY)
+
+        with st.spinner(f"Agent 1 (Data Fetcher): Securing data for {st.session_state.ticker}..."):
+            excel_path, pdf_path = download_financial_data(
+                st.session_state.ticker, SCREENER_EMAIL, SCREENER_PASSWORD, DOWNLOAD_DIRECTORY
+            )
+
+        if pdf_path:
+            st.success("Data Fetcher Agent: PDF secured.")
+            with st.spinner("The Qualitative Agent is reading the Annual Report..."):
+                st.session_state.report_data = process_annual_report(pdf_path)
+            if not st.session_state.report_data:
+                st.error("Qualitative Agent failed: Could not process the PDF document.")
         else:
-            # --- Agent 1: Data Fetcher ---
-            st.info(f"Agent 1: Fetching financial data for {ticker} from Screener.in...")
-            with st.spinner("The Data Fetcher agent is running. This may take a moment..."):
-                try:
-                    # Call the download function
-                    download_screener_excel(ticker, SCREENER_EMAIL, SCREENER_PASSWORD, DOWNLOAD_DIRECTORY)
-                    excel_path = os.path.join(DOWNLOAD_DIRECTORY, f"{ticker}.xlsx")
-                    
-                    if os.path.exists(excel_path):
-                        st.success(f"Agent 1: Successfully downloaded data to {excel_path}")
-                        
-                        # --- Agent 2: Quantitative Analyst ---
-                        st.info(f"Agent 2: Performing quantitative analysis for {ticker}...")
-                        with st.spinner("The Quantitative Analyst agent is processing the data and calling the Gemini API..."):
-                            try:
-                                # Call the analysis function, which now returns the report
-                                analysis_report = analyze_financials(excel_path, ticker)
-                                
-                                st.success("Agent 2: Analysis complete!")
-                                
-                                # --- Display the Final Report ---
-                                st.markdown("---")
-                                st.header(f"Quantitative Analysis Report for {ticker.upper()}")
-                                st.markdown(analysis_report)
+            st.error("Data Fetcher Agent failed: Could not secure the PDF file.")
 
-                            except Exception as e:
-                                st.error(f"An error occurred during analysis: {e}")
+# --- Main Chat Interface ---
+st.header(f"Qualitative Analysis for {st.session_state.ticker.upper()}")
 
-                    else:
-                        st.error(f"Agent 1: Failed to download the data file for {ticker}. Please check the console for errors.")
-                
-                except Exception as e:
-                    st.error(f"An error occurred during data download: {e}")
+# NEW: Display chat history
+chat_container = st.container()
+with chat_container:
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
 
+# Only show the chat input if the report has been processed
+if st.session_state.report_data:
+    if prompt := st.chat_input("Ask a question about the annual report..."):
+        # Add user message to history
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        # Display user message
+        with chat_container:
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+        # Generate and display AI response
+        with st.spinner("The Qualitative Agent is analyzing..."):
+            response = answer_qualitative_question(st.session_state.report_data, prompt)
+            with chat_container:
+                 with st.chat_message("assistant"):
+                    st.markdown(response)
+            # Add AI response to history
+            st.session_state.messages.append({"role": "assistant", "content": response})
 else:
-    st.info("Enter a stock ticker in the sidebar and click 'Analyze Stock' to begin.")
-
-
+    st.info("Click 'Analyze Stock' to begin the analysis.")
