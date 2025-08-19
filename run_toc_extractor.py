@@ -33,7 +33,6 @@ def main(file_name: str):
         print("\n--- ‼️ TOC Extraction Failed ---")
         print(f"Detected TOC Title: '{toc_title}'")
         print("Could not generate a valid, mapped Table of Contents from the document.")
-        # Also print the map for debugging
         if page_number_map:
             print("\n--- 🗺️ Generated Page Map (Debug Sample) ---")
             map_items = list(sorted(page_number_map.items()))
@@ -47,12 +46,12 @@ def main(file_name: str):
     print(f"AI Parser identified {len(raw_toc)} unique sections.")
     print(f"Page mapping created with {len(page_number_map)} entries.")
 
+    # The raw_toc from the LLM is now a list of 3-item tuples (level, title, page)
     print("\n--- 🤖 Raw TOC from LLM (Sorted & Unique) ---")
-    for item in raw_toc:
-        print(f"  - Title: '{item[1]}', Printed Page: {item[2]}")
+    for _level, title, page in raw_toc:
+        print(f"  - Title: '{title}', Printed Page: {page}")
     
     print("\n--- 🗺️ Generated Page Map (Sample) ---")
-    # Sort the map by physical index for a more intuitive display
     map_items = list(sorted(page_number_map.items(), key=lambda item: item[1]))
     if len(map_items) > 10:
         for p_page, p_index in map_items[:5]:
@@ -79,10 +78,10 @@ def main(file_name: str):
     
     if skipped_titles:
         print("\n--- ⚠️ Skipped Sections ---")
-        print("The following sections were skipped because their page numbers could not be found in the map:")
+        print("The following sections were skipped because their page numbers (or the next few) could not be found in the map:")
         for title in sorted(list(skipped_titles)):
-             # Find the printed page for the skipped title for better debug info
-             printed_page = next((p for l,t,p,_ in raw_toc if t == title), "N/A")
+             # THE FIX: Unpack the 3-item tuple correctly
+             printed_page = next((p for _l, t, p in raw_toc if t == title), "N/A")
              print(f"  - {title} (Printed Page: {printed_page})")
     
     print("-------------------------------------------\n")

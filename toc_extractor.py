@@ -22,7 +22,7 @@ def _extract_toc_with_llm(text: str) -> List[tuple]:
     """
     try:
         # This prompt is specifically designed to understand and extract hierarchical TOCs.
-        response = genai.GenerativeModel('gemini-1.5-flash').generate_content(
+        response = genai.GenerativeModel('gemini-2.5-flash').generate_content(
              f"""You are an expert document parser. Below is the raw text from the first few pages of a PDF.
             Your task is to identify the Table of Contents. It might be titled "Table of Contents", "Contents of table", "Contents", "Index", "Inside the Report", "Across the pages","What's inside", or other variations.
             
@@ -65,68 +65,88 @@ def _extract_toc_with_llm(text: str) -> List[tuple]:
 def _create_sanity_checked_page_map(doc: fitz.Document) -> Dict[int, int]:
     """
     Creates a highly accurate map of printed pages to physical indices by using
-    a coordinate-based search with a plausibility "sanity check".
+    a coordinate-based search for isolated numbers in the footer.
     """
-    direct_map = {}
+    page_map = {}
     for i in range(doc.page_count):
         page = doc.load_page(i)
         page_height = page.rect.height
         
-        blocks = page.get_text("dict")["blocks"]
+        # Use get_text("words") for more granular analysis of potential page numbers.
+        words = page.get_text("words")
         
-        footer_numbers = []
-        for block in blocks:
-            if "lines" in block:
-                for line in block["lines"]:
-                    for span in line["spans"]:
-                        is_in_lower_part = span["bbox"][3] > page_height * 0.75
-                        if is_in_lower_part:
-                            text = span["text"].strip()
-                            if text.isdigit():
-                                page_num = int(text)
-                                if 0 < page_num <= doc.page_count + 50:
-                                    footer_numbers.append(page_num)
-        
-        if not footer_numbers:
-            continue
+        candidate_numbers = []
+        # Filter for words in the bottom 20% of the page that are purely numeric.
+        for word in words:
+            x0, y0, x1, y1, text, block_no, line_no, word_no = word
+            is_in_footer = y1 > page_height * 0.80  # Check bottom 20%
+            if is_in_footer and text.isdigit():
+                page_num = int(text)
+                # Stricter sanity check: page number should be plausible relative to physical index
+                if 0 < page_num <= doc.page_count + 50 and abs(page_num - (i + 1)) < 150:
+                    candidate_numbers.append(page_num)
 
-        for page_num in footer_numbers:
-            if abs(page_num - (i + 1)) < 50:
-                if page_num not in direct_map:
-                    direct_map[page_num] = i
+        # If candidates are found, pick the most plausible one.
+        # This avoids picking up random numbers. Often, the largest number in the footer is the page number.
+        if candidate_numbers:
+            # We only map one printed number to one physical index.
+            # If a printed number is already mapped, we don't overwrite it,
+            # as the first occurrence is likely correct.
+            most_likely_page_num = max(candidate_numbers) # A simple heuristic that often works
+            if most_likely_page_num not in page_map:
+                page_map[most_likely_page_num] = i
                 
-    return direct_map
+    return page_map
+
 
 def _find_toc_page_text(doc: fitz.Document) -> Tuple[Optional[str], str]:
     """
     Scans the first 40 pages to find the Table of Contents and returns its text.
+    This version is robust against out-of-order text and character variations.
     """
     print("Searching for the Table of Contents page...")
-    toc_pattern = re.compile(r'\b(contents|index|table of contents)\b', re.IGNORECASE)
-    
-    # Scan the first 40 pages, which is a safe upper limit for most reports
+
+    # Define sets of keywords for each potential TOC title with more robust patterns
+    toc_titles_keywords = {
+        # Removed \b to be more lenient
+        "Table of Contents": [re.compile(r'table', re.IGNORECASE), re.compile(r'contents', re.IGNORECASE)],
+        "Across the pages": [re.compile(r'Across', re.IGNORECASE), re.compile(r'pages', re.IGNORECASE)],
+        "Contents": [re.compile(r'contents', re.IGNORECASE)],
+        "Index": [re.compile(r'index', re.IGNORECASE)],
+        "Inside the Report": [re.compile(r'inside', re.IGNORECASE), re.compile(r'report', re.IGNORECASE)],
+        # Matches both ' and ’ (straight and curly apostrophe)
+        "What's inside": [re.compile(r"what[\u2019']s\s+inside", re.IGNORECASE)],
+    }
+
+    # Scan the first 40 pages
     for i in range(min(40, doc.page_count)):
         page = doc.load_page(i)
-        text = page.get_text()
-        
-        match = toc_pattern.search(text)
-        if match:
-            print(f"Found TOC keyword '{match.group(0)}' on physical page {i+1}.")
-            # Extract text from this page and the next one in case it spans multiple pages
-            toc_text = page.get_text("blocks")
-            toc_text.sort(key=lambda b: (b[1], b[0]))
+        # We still normalize newlines to spaces, as it's a good practice
+        text = page.get_text().replace('\n', ' ')
+
+        found_title = None
+        # Check if all keywords for any TOC title are present on the page
+        for title, keywords in toc_titles_keywords.items():
+            if all(keyword.search(text) for keyword in keywords):
+                found_title = title
+                break  # Stop checking once we find a match
+
+        if found_title:
+            print(f"Found TOC keyword(s) for '{found_title}' on physical page {i+1}.")
             
-            full_toc_text = "\n".join([block[4] for block in toc_text])
+            # Extract text from this page and the next one
+            toc_text_blocks = page.get_text("blocks")
+            toc_text_blocks.sort(key=lambda b: (b[1], b[0]))
+            full_toc_text = "\n".join([block[4] for block in toc_text_blocks])
 
             if i + 1 < doc.page_count:
                 next_page_blocks = doc.load_page(i + 1).get_text("blocks")
                 next_page_blocks.sort(key=lambda b: (b[1], b[0]))
                 full_toc_text += "\n" + "\n".join([block[4] for block in next_page_blocks])
 
-            return full_toc_text, match.group(0).strip()
-            
-    return None, "Unknown"
+            return full_toc_text, found_title
 
+    return None, "Unknown" 
 
 def get_toc_data(pdf_path: str) -> Optional[Dict[str, Any]]:
     """
@@ -137,7 +157,6 @@ def get_toc_data(pdf_path: str) -> Optional[Dict[str, Any]]:
     try:
         doc = fitz.open(pdf_path)
         
-        # Step 1: Intelligently find the TOC text instead of assuming it's in the first 15 pages.
         toc_text, toc_title = _find_toc_page_text(doc)
 
         if not toc_text:
@@ -151,7 +170,7 @@ def get_toc_data(pdf_path: str) -> Optional[Dict[str, Any]]:
             print("LLM Parser did not find a valid Table of Contents from the located page.")
             return {"toc_title": toc_title, "raw_toc": [], "page_number_map": {}, "final_toc": []}
 
-        raw_toc.sort(key=lambda x: x[2]) # Sort by page number
+        raw_toc.sort(key=lambda x: x[2])
         
         print("Step 2: Building a sanity-checked map of physical pages...")
         page_number_map = _create_sanity_checked_page_map(doc)
@@ -167,27 +186,34 @@ def get_toc_data(pdf_path: str) -> Optional[Dict[str, Any]]:
             
             start_page_index = page_number_map.get(printed_start_page)
             if start_page_index is None: # Fuzzy lookup
-                for offset in range(1, 4):
+                for offset in [1, -1, 2]: # Check +1, -1, +2 pages
                     start_page_index = page_number_map.get(printed_start_page + offset)
                     if start_page_index is not None: break
             
-            if start_page_index is None: continue
+            if start_page_index is None:
+                print(f"  -> Skipping '{title}' (p. {printed_start_page}) - could not find its physical page.")
+                continue
 
+            # Default end page is the last page of the document.
             end_page_index = doc.page_count - 1
-            # Find the next item at the same or a higher level to determine the end page
-            for j in range(i + 1, len(raw_toc)):
-                next_level, _next_title, next_printed_page = raw_toc[j]
-                if next_level <= level:
-                    next_start_page_index = page_number_map.get(next_printed_page)
-                    if next_start_page_index is None: # Fuzzy lookup
-                        for offset in range(1, 4):
-                            next_start_page_index = page_number_map.get(next_printed_page + offset)
-                            if next_start_page_index is not None: break
-                    
-                    if next_start_page_index is not None:
-                        end_page_index = max(start_page_index, next_start_page_index - 1)
-                    break 
             
+            # Find the next item to determine the end page.
+            if i + 1 < len(raw_toc):
+                _next_level, _next_title, next_printed_page = raw_toc[i+1]
+                next_start_page_index = page_number_map.get(next_printed_page)
+                
+                if next_start_page_index is None: # Fuzzy lookup for the next item
+                     for offset in [1, -1, 2]:
+                        next_start_page_index = page_number_map.get(next_printed_page + offset)
+                        if next_start_page_index is not None: break
+                
+                # If the next section's page is found and is after the current section's start
+                if next_start_page_index is not None and next_start_page_index > start_page_index:
+                    end_page_index = next_start_page_index - 1
+                else:
+                    # If the next page is illogical or not found, assume it's a single-page section.
+                    end_page_index = start_page_index
+
             final_toc.append({'title': title, 'start': start_page_index, 'end': end_page_index})
         
         return {
