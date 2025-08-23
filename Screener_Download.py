@@ -1,5 +1,6 @@
 import os
 import time
+import argparse
 from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -8,13 +9,23 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 
+def wait_for_new_file(download_path: str, files_before: list, timeout: int = 30) -> str | None:
+    """Waits for a new file to appear in the download directory."""
+    for _ in range(timeout):
+        files_after = os.listdir(download_path)
+        new_files = [f for f in files_after if f not in files_before and not f.endswith('.crdownload')]
+        if new_files:
+            return new_files[0] # Return the first new file found
+        time.sleep(1)
+    return None
+
 def download_financial_data(ticker: str, email: str, password: str, download_path: str):
     """
-    Downloads Excel and PDF, waits for them to be fully downloaded and renamed,
-    and then returns their final, stable paths.
+    Downloads Excel, PDF Annual Report, and the latest Concall Transcript individually
+    and with robust error handling for each file.
     
     Returns:
-        A tuple (excel_path, pdf_path), or (None, None) on failure.
+        A tuple (excel_path, pdf_path, transcript_path). Paths will be None if a download failed.
     """
     chrome_options = webdriver.ChromeOptions()
     prefs = {
@@ -26,63 +37,133 @@ def download_financial_data(ticker: str, email: str, password: str, download_pat
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--window-size=1920,1080")
     driver = None
+    
+    final_excel_path, final_pdf_path, final_transcript_path = None, None, None
+
     try:
         service = ChromeService(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
         wait = WebDriverWait(driver, 20)
         
         # Login
+        print("Logging into Screener.in...")
         driver.get("https://www.screener.in/login/")
         wait.until(EC.presence_of_element_located((By.ID, "id_username"))).send_keys(email)
         wait.until(EC.presence_of_element_located((By.ID, "id_password"))).send_keys(password)
         wait.until(EC.presence_of_element_located((By.XPATH, "//button[@type='submit']"))).click()
         time.sleep(3)
+        print("Login successful.")
 
-        # Navigate and Initiate Downloads
-        company_url = f"https://www.screener.in/company/{ticker}/consolidated/"
-        driver.get(company_url)
-        files_before = set(os.listdir(download_path))
-        
-        wait.until(EC.element_to_be_clickable((By.XPATH, "//button[.//span[contains(text(), 'Export to Excel')]]"))).click()
-        print("Initiating Excel download...")
-        
-        wait.until(EC.element_to_be_clickable((By.LINK_TEXT, "Documents"))).click()
-        wait.until(EC.element_to_be_clickable((By.XPATH, "//h3[text()='Annual reports']/following-sibling::div[1]//a[1]"))).click()
-        print("Initiating Annual Report PDF download...")
-
-        # Robust Wait, Rename, and Path Return Logic
-        wait_time = 60
-        final_excel_path, final_pdf_path = None, None
-        for i in range(wait_time):
-            new_files = set(os.listdir(download_path)) - files_before
-            temp_excel = next((f for f in new_files if f.endswith('.xlsx') and not f.endswith('.crdownload')), None)
-            temp_pdf = next((f for f in new_files if f.endswith('.pdf') and not f.endswith('.crdownload')), None)
-
-            if temp_excel and not final_excel_path:
+        # --- 1. Download Excel File ---
+        try:
+            print("Navigating to the main company page for Excel download...")
+            company_url = f"https://www.screener.in/company/{ticker}/consolidated/"
+            driver.get(company_url)
+            
+            files_before = os.listdir(download_path)
+            wait.until(EC.element_to_be_clickable((By.XPATH, "//button[.//span[contains(text(), 'Export to Excel')]]"))).click()
+            print("Initiating Excel download...")
+            
+            new_filename = wait_for_new_file(download_path, files_before)
+            if new_filename:
                 final_excel_path = os.path.join(download_path, f"{ticker}.xlsx")
                 if os.path.exists(final_excel_path): os.remove(final_excel_path)
-                os.rename(os.path.join(download_path, temp_excel), final_excel_path)
-                print(f"SUCCESS: Excel file download confirmed and renamed to: {final_excel_path}")
+                os.rename(os.path.join(download_path, new_filename), final_excel_path)
+                print(f"SUCCESS: Excel file saved to: {final_excel_path}")
+            else:
+                print("ERROR: Excel download timed out.")
+        except Exception as e:
+            print(f"ERROR: Could not download the Excel report. Skipping. Reason: {e}")
+
+        # --- 2. Download Documents (Annual Report & Transcript) ---
+        print("\nNavigating to the Documents page...")
+        wait.until(EC.element_to_be_clickable((By.LINK_TEXT, "Documents"))).click()
+        time.sleep(2) # Allow documents section to load
+
+        # --- Download Annual Report PDF ---
+        try:
+            files_before = os.listdir(download_path)
+            wait.until(EC.element_to_be_clickable((By.XPATH, "//h3[text()='Annual reports']/following-sibling::div[1]//a[1]"))).click()
+            print("Initiating Annual Report PDF download...")
             
-            if temp_pdf and not final_pdf_path:
+            new_filename = wait_for_new_file(download_path, files_before)
+            if new_filename:
                 final_pdf_path = os.path.join(download_path, f"{ticker}_Annual_Report.pdf")
                 if os.path.exists(final_pdf_path): os.remove(final_pdf_path)
-                os.rename(os.path.join(download_path, temp_pdf), final_pdf_path)
-                print(f"SUCCESS: PDF file download confirmed and renamed to: {final_pdf_path}")
-
-            if final_excel_path and final_pdf_path:
-                time.sleep(2) # Final small buffer before closing browser
-                driver.quit()
-                return final_excel_path, final_pdf_path
+                os.rename(os.path.join(download_path, new_filename), final_pdf_path)
+                print(f"SUCCESS: Annual Report saved to: {final_pdf_path}")
+            else:
+                print("ERROR: Annual Report download timed out.")
+        except Exception as e:
+            print(f"ERROR: Could not download the Annual Report. Skipping. Reason: {e}")
             
-            time.sleep(1)
+        # --- Download Concall Transcript ---
+        try:
+            files_before = os.listdir(download_path)
+            transcript_xpath = "//h3[normalize-space()='Concalls']/following::a[contains(@class, 'concall-link') and contains(text(),'Transcript')][1]"
 
-        print("Error: Download timed out for one or both files.")
-        driver.quit()
-        return None, None
+            transcript_elem = wait.until(EC.presence_of_element_located((By.XPATH, transcript_xpath)))
+            wait.until(EC.element_to_be_clickable((By.XPATH, transcript_xpath)))
 
-    except Exception as e:
-        print(f"An unexpected error occurred during download: {e}")
+            transcript_elem.click()
+            print("Initiating Concall Transcript download...")
+
+            new_filename = wait_for_new_file(download_path, files_before)
+            if new_filename:
+                _, extension = os.path.splitext(new_filename)
+                final_transcript_path = os.path.join(download_path, f"{ticker}_Concall_Transcript{extension}")
+                if os.path.exists(final_transcript_path): os.remove(final_transcript_path)
+                os.rename(os.path.join(download_path, new_filename), final_transcript_path)
+                print(f"SUCCESS: Concall Transcript saved to: {final_transcript_path}")
+            else:
+                print("ERROR: Concall Transcript download timed out.")
+        except Exception as e:
+            print(f"INFO: Concall Transcript not found or available. Skipping. Reason: {e}")
+
+
+
+        return final_excel_path, final_pdf_path, final_transcript_path
+
+    finally:
         if driver:
             driver.quit()
-        return None, None
+        print("\nBrowser closed.")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Download financial data from Screener.in for a given stock ticker.")
+    parser.add_argument("ticker", type=str, help="The stock ticker symbol (e.g., DOMS, RELIANCE).")
+    args = parser.parse_args()
+
+    load_dotenv()
+    SCREENER_EMAIL = os.getenv("SCREENER_EMAIL")
+    SCREENER_PASSWORD = os.getenv("SCREENER_PASSWORD")
+
+    if not SCREENER_EMAIL or not SCREENER_PASSWORD:
+        print("Error: Make sure SCREENER_EMAIL and SCREENER_PASSWORD are set in your .env file.")
+    else:
+        DOWNLOAD_DIRECTORY = os.path.join(os.getcwd(), "downloads")
+        if not os.path.exists(DOWNLOAD_DIRECTORY):
+            os.makedirs(DOWNLOAD_DIRECTORY)
+
+        print(f"--- Starting Download for Ticker: {args.ticker} ---")
+        excel_path, pdf_path, transcript_path = download_financial_data(
+            args.ticker, SCREENER_EMAIL, SCREENER_PASSWORD, DOWNLOAD_DIRECTORY
+        )
+
+        print("\n--- Download Summary ---")
+        if excel_path:
+            print(f"Excel Report saved to: {excel_path}")
+        else:
+            print("Excel Report: FAILED")
+        
+        if pdf_path:
+            print(f"Annual Report saved to: {pdf_path}")
+        else:
+            print("Annual Report: FAILED")
+            
+        if transcript_path:
+            print(f"Concall Transcript saved to: {transcript_path}")
+        else:
+            print("Concall Transcript: FAILED / NOT FOUND")
+        print("------------------------")
