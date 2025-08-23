@@ -100,25 +100,44 @@ def download_financial_data(ticker: str, email: str, password: str, download_pat
         # --- Download Concall Transcript ---
         try:
             files_before = os.listdir(download_path)
-            transcript_xpath = "//h3[normalize-space()='Concalls']/following::a[contains(@class, 'concall-link') and contains(text(),'Transcript')][1]"
-
-            transcript_elem = wait.until(EC.presence_of_element_located((By.XPATH, transcript_xpath)))
-            wait.until(EC.element_to_be_clickable((By.XPATH, transcript_xpath)))
-
-            transcript_elem.click()
-            print("Initiating Concall Transcript download...")
-
-            new_filename = wait_for_new_file(download_path, files_before)
-            if new_filename:
-                _, extension = os.path.splitext(new_filename)
-                final_transcript_path = os.path.join(download_path, f"{ticker}_Concall_Transcript{extension}")
-                if os.path.exists(final_transcript_path): os.remove(final_transcript_path)
-                os.rename(os.path.join(download_path, new_filename), final_transcript_path)
-                print(f"SUCCESS: Concall Transcript saved to: {final_transcript_path}")
+    
+            # Find ALL transcript links under Concalls section
+            transcripts_xpath = "//h3[normalize-space()='Concalls']/following::a[contains(@class, 'concall-link') and contains(text(),'Transcript')]"
+            transcript_elems = wait.until(EC.presence_of_all_elements_located((By.XPATH, transcripts_xpath)))
+    
+            if len(transcript_elems) == 0:
+                print("INFO: No concall transcripts found.")
             else:
-                print("ERROR: Concall Transcript download timed out.")
+                # --- Latest transcript (first one)
+                transcript_elems[0].click()
+                print("Initiating Latest Concall Transcript download...")
+                new_filename = wait_for_new_file(download_path, files_before)
+                if new_filename:
+                    _, extension = os.path.splitext(new_filename)
+                    final_transcript_path = os.path.join(download_path, f"{ticker}_Concall_Transcript_Latest{extension}")
+                    if os.path.exists(final_transcript_path): os.remove(final_transcript_path)
+                    os.rename(os.path.join(download_path, new_filename), final_transcript_path)
+                    print(f"SUCCESS: Latest Concall Transcript saved to: {final_transcript_path}")
+                else:
+                    print("ERROR: Latest Concall Transcript download timed out.")
+
+                # --- Previous transcript (second one, if available)
+                if len(transcript_elems) > 1:
+                    files_before = os.listdir(download_path)  # reset list
+                    transcript_elems[1].click()
+                    print("Initiating Previous Concall Transcript download...")
+                    new_filename = wait_for_new_file(download_path, files_before)
+                    if new_filename:
+                        _, extension = os.path.splitext(new_filename)
+                        prev_transcript_path = os.path.join(download_path, f"{ticker}_Concall_Transcript_Previous{extension}")
+                        if os.path.exists(prev_transcript_path): os.remove(prev_transcript_path)
+                        os.rename(os.path.join(download_path, new_filename), prev_transcript_path)
+                        print(f"SUCCESS: Previous Concall Transcript saved to: {prev_transcript_path}")
+                    else:
+                        print("ERROR: Previous Concall Transcript download timed out.")
         except Exception as e:
-            print(f"INFO: Concall Transcript not found or available. Skipping. Reason: {e}")
+            print(f"INFO: Concall Transcript(s) not found or available. Skipping. Reason: {e}")
+
 
 
 
