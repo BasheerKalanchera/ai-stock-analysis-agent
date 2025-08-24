@@ -21,11 +21,12 @@ def wait_for_new_file(download_path: str, files_before: list, timeout: int = 30)
 
 def download_financial_data(ticker: str, email: str, password: str, download_path: str):
     """
-    Downloads Excel, PDF Annual Report, and the latest Concall Transcript individually
-    and with robust error handling for each file.
+    Downloads Excel and the two most recent Concall Transcripts.
+    The Annual Report download has been disabled.
     
     Returns:
-        A tuple (excel_path, pdf_path, transcript_path). Paths will be None if a download failed.
+        A tuple (excel_path, pdf_path, latest_transcript_path, previous_transcript_path).
+        pdf_path will be None. Other paths will be None if a download failed.
     """
     chrome_options = webdriver.ChromeOptions()
     prefs = {
@@ -34,11 +35,12 @@ def download_financial_data(ticker: str, email: str, password: str, download_pat
         "download.prompt_for_download": False
     }
     chrome_options.add_experimental_option("prefs", prefs)
-    chrome_options.add_argument("--headless")
+    # Comment out the next line to see the browser in action
+    chrome_options.add_argument("--headless") 
     chrome_options.add_argument("--window-size=1920,1080")
     driver = None
     
-    final_excel_path, final_pdf_path, final_transcript_path = None, None, None
+    final_excel_path, final_pdf_path, final_latest_transcript_path, final_previous_transcript_path = None, None, None, None
 
     try:
         service = ChromeService(ChromeDriverManager().install())
@@ -75,73 +77,70 @@ def download_financial_data(ticker: str, email: str, password: str, download_pat
         except Exception as e:
             print(f"ERROR: Could not download the Excel report. Skipping. Reason: {e}")
 
-        # --- 2. Download Documents (Annual Report & Transcript) ---
+        # --- 2. Download Documents (Transcripts) ---
         print("\nNavigating to the Documents page...")
         wait.until(EC.element_to_be_clickable((By.LINK_TEXT, "Documents"))).click()
         time.sleep(2) # Allow documents section to load
 
-        # --- Download Annual Report PDF ---
-        try:
-            files_before = os.listdir(download_path)
-            wait.until(EC.element_to_be_clickable((By.XPATH, "//h3[text()='Annual reports']/following-sibling::div[1]//a[1]"))).click()
-            print("Initiating Annual Report PDF download...")
+        # --- Download Annual Report PDF (DISABLED) ---
+        # try:
+        #     files_before = os.listdir(download_path)
+        #     wait.until(EC.element_to_be_clickable((By.XPATH, "//h3[text()='Annual reports']/following-sibling::div[1]//a[1]"))).click()
+        #     print("Initiating Annual Report PDF download...")
             
-            new_filename = wait_for_new_file(download_path, files_before)
-            if new_filename:
-                final_pdf_path = os.path.join(download_path, f"{ticker}_Annual_Report.pdf")
-                if os.path.exists(final_pdf_path): os.remove(final_pdf_path)
-                os.rename(os.path.join(download_path, new_filename), final_pdf_path)
-                print(f"SUCCESS: Annual Report saved to: {final_pdf_path}")
-            else:
-                print("ERROR: Annual Report download timed out.")
-        except Exception as e:
-            print(f"ERROR: Could not download the Annual Report. Skipping. Reason: {e}")
+        #     new_filename = wait_for_new_file(download_path, files_before)
+        #     if new_filename:
+        #         final_pdf_path = os.path.join(download_path, f"{ticker}_Annual_Report.pdf")
+        #         if os.path.exists(final_pdf_path): os.remove(final_pdf_path)
+        #         os.rename(os.path.join(download_path, new_filename), final_pdf_path)
+        #         print(f"SUCCESS: Annual Report saved to: {final_pdf_path}")
+        #     else:
+        #         print("ERROR: Annual Report download timed out.")
+        # except Exception as e:
+        #     print(f"INFO: Annual Report download skipped as requested. Reason: {e}")
             
-        # --- Download Concall Transcript ---
+        # --- Download Concall Transcripts ---
         try:
-            files_before = os.listdir(download_path)
-    
-            # Find ALL transcript links under Concalls section
+            # Find ALL transcript links under the "Concalls" section
             transcripts_xpath = "//h3[normalize-space()='Concalls']/following::a[contains(@class, 'concall-link') and contains(text(),'Transcript')]"
             transcript_elems = wait.until(EC.presence_of_all_elements_located((By.XPATH, transcripts_xpath)))
     
-            if len(transcript_elems) == 0:
+            if not transcript_elems:
                 print("INFO: No concall transcripts found.")
             else:
-                # --- Latest transcript (first one)
+                # --- Download Latest transcript (first one) ---
+                files_before = os.listdir(download_path)
                 transcript_elems[0].click()
                 print("Initiating Latest Concall Transcript download...")
                 new_filename = wait_for_new_file(download_path, files_before)
                 if new_filename:
                     _, extension = os.path.splitext(new_filename)
-                    final_transcript_path = os.path.join(download_path, f"{ticker}_Concall_Transcript_Latest{extension}")
-                    if os.path.exists(final_transcript_path): os.remove(final_transcript_path)
-                    os.rename(os.path.join(download_path, new_filename), final_transcript_path)
-                    print(f"SUCCESS: Latest Concall Transcript saved to: {final_transcript_path}")
+                    final_latest_transcript_path = os.path.join(download_path, f"{ticker}_Concall_Transcript_Latest{extension}")
+                    if os.path.exists(final_latest_transcript_path): os.remove(final_latest_transcript_path)
+                    os.rename(os.path.join(download_path, new_filename), final_latest_transcript_path)
+                    print(f"SUCCESS: Latest Concall Transcript saved to: {final_latest_transcript_path}")
                 else:
                     print("ERROR: Latest Concall Transcript download timed out.")
 
-                # --- Previous transcript (second one, if available)
+                # --- Download Previous transcript (second one, if available) ---
                 if len(transcript_elems) > 1:
-                    files_before = os.listdir(download_path)  # reset list
+                    transcript_elems = wait.until(EC.presence_of_all_elements_located((By.XPATH, transcripts_xpath)))
+                    files_before = os.listdir(download_path)
                     transcript_elems[1].click()
                     print("Initiating Previous Concall Transcript download...")
                     new_filename = wait_for_new_file(download_path, files_before)
                     if new_filename:
                         _, extension = os.path.splitext(new_filename)
-                        prev_transcript_path = os.path.join(download_path, f"{ticker}_Concall_Transcript_Previous{extension}")
-                        if os.path.exists(prev_transcript_path): os.remove(prev_transcript_path)
-                        os.rename(os.path.join(download_path, new_filename), prev_transcript_path)
-                        print(f"SUCCESS: Previous Concall Transcript saved to: {prev_transcript_path}")
+                        final_previous_transcript_path = os.path.join(download_path, f"{ticker}_Concall_Transcript_Previous{extension}")
+                        if os.path.exists(final_previous_transcript_path): os.remove(final_previous_transcript_path)
+                        os.rename(os.path.join(download_path, new_filename), final_previous_transcript_path)
+                        print(f"SUCCESS: Previous Concall Transcript saved to: {final_previous_transcript_path}")
                     else:
                         print("ERROR: Previous Concall Transcript download timed out.")
         except Exception as e:
-            print(f"INFO: Concall Transcript(s) not found or available. Skipping. Reason: {e}")
+            print(f"INFO: Concall Transcript(s) not found or an error occurred. Skipping. Reason: {e}")
 
-
-
-
-        return final_excel_path, final_pdf_path, final_transcript_path
+        return final_excel_path, final_pdf_path, final_latest_transcript_path, final_previous_transcript_path
 
     finally:
         if driver:
@@ -166,23 +165,13 @@ if __name__ == "__main__":
             os.makedirs(DOWNLOAD_DIRECTORY)
 
         print(f"--- Starting Download for Ticker: {args.ticker} ---")
-        excel_path, pdf_path, transcript_path = download_financial_data(
+        excel_path, pdf_path, latest_transcript, previous_transcript = download_financial_data(
             args.ticker, SCREENER_EMAIL, SCREENER_PASSWORD, DOWNLOAD_DIRECTORY
         )
 
         print("\n--- Download Summary ---")
-        if excel_path:
-            print(f"Excel Report saved to: {excel_path}")
-        else:
-            print("Excel Report: FAILED")
-        
-        if pdf_path:
-            print(f"Annual Report saved to: {pdf_path}")
-        else:
-            print("Annual Report: FAILED")
-            
-        if transcript_path:
-            print(f"Concall Transcript saved to: {transcript_path}")
-        else:
-            print("Concall Transcript: FAILED / NOT FOUND")
+        print(f"Excel Report: {excel_path or 'FAILED'}")
+        print(f"Annual Report: SKIPPED")
+        print(f"Latest Transcript: {latest_transcript or 'FAILED / NOT FOUND'}")
+        print(f"Previous Transcript: {previous_transcript or 'FAILED / NOT FOUND'}")
         print("------------------------")
