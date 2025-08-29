@@ -8,6 +8,7 @@ def main(file_name: str):
     """
     Runs the TOC extraction process and displays detailed debugging information.
     """
+    # Assuming a 'downloads' folder in the current working directory
     pdf_path = os.path.join(os.getcwd(), "downloads", file_name)
 
     if not os.path.exists(pdf_path):
@@ -26,47 +27,28 @@ def main(file_name: str):
 
     toc_title = toc_result.get('toc_title', 'Unknown')
     raw_toc = toc_result.get('raw_toc', [])
-    page_number_map = toc_result.get('page_number_map', {})
     final_toc = toc_result.get('final_toc', [])
     
     if not final_toc:
         print("\n--- ‼️ TOC Extraction Failed ---")
         print(f"Detected TOC Title: '{toc_title}'")
         print("Could not generate a valid, mapped Table of Contents from the document.")
-        if page_number_map:
-            print("\n--- 🗺️ Generated Page Map (Debug Sample) ---")
-            map_items = list(sorted(page_number_map.items()))
-            for p_page, p_index in map_items[:15]:
-                print(f"  - Printed page '{p_page}' -> Physical page {p_index + 1} (Index: {p_index})")
         print("---------------------------------\n")
         return
         
     print("\n--- ✅ TOC Extraction Succeeded ---")
     print(f"Detected TOC Title: '{toc_title}'")
-    print(f"AI Parser identified {len(raw_toc)} unique sections.")
-    print(f"Page mapping created with {len(page_number_map)} entries.")
-
-    # The raw_toc from the LLM is now a list of 3-item tuples (level, title, page)
-    print("\n--- 🤖 Raw TOC from LLM (Sorted & Unique) ---")
-    for _level, title, page in raw_toc:
-        print(f"  - Title: '{title}', Printed Page: {page}")
+    print(f"AI Parser identified {len(raw_toc)} unique raw sections.")
     
-    print("\n--- 🗺️ Generated Page Map (Sample) ---")
-    map_items = list(sorted(page_number_map.items(), key=lambda item: item[1]))
-    if len(map_items) > 10:
-        for p_page, p_index in map_items[:5]:
-            print(f"  - Printed page '{p_page}' -> Physical page {p_index + 1} (Index: {p_index})")
-        print("  ...")
-        for p_page, p_index in map_items[-5:]:
-            print(f"  - Printed page '{p_page}' -> Physical page {p_index + 1} (Index: {p_index})")
-    else:
-        for p_page, p_index in map_items:
-            print(f"  - Printed page '{p_page}' -> Physical page {p_index + 1} (Index: {p_index})")
+    print("\n--- 🤖 Raw TOC from LLM (Sorted by Printed Page) ---")
+    sorted_raw_toc = sorted(raw_toc, key=lambda x: x[2])
+    for _level, title, page in sorted_raw_toc:
+        print(f"  - Title: '{title.strip()}', Printed Page: {page}")
 
     print("\n--- 📖 Final Validated TOC Entries ---")
-    print(f"Validated and refined {len(final_toc)} of {len(raw_toc)} sections.")
+    print(f"Found physical pages for {len(final_toc)} of {len(raw_toc)} sections.")
     
-    raw_titles = {item[1] for item in raw_toc}
+    raw_titles = {item[1].strip() for item in raw_toc}
     final_titles = {item['title'] for item in final_toc}
     skipped_titles = raw_titles - final_titles
     
@@ -78,10 +60,9 @@ def main(file_name: str):
     
     if skipped_titles:
         print("\n--- ⚠️ Skipped Sections ---")
-        print("The following sections were skipped because their page numbers (or the next few) could not be found in the map:")
+        print("The following sections were skipped because their titles could not be found in the document:")
         for title in sorted(list(skipped_titles)):
-             # THE FIX: Unpack the 3-item tuple correctly
-             printed_page = next((p for _l, t, p in raw_toc if t == title), "N/A")
+             printed_page = next((p for _l, t, p in raw_toc if t.strip() == title), "N/A")
              print(f"  - {title} (Printed Page: {printed_page})")
     
     print("-------------------------------------------\n")
@@ -90,6 +71,11 @@ def main(file_name: str):
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("\nUsage: python run_toc_extractor.py <your_pdf_file_name.pdf>")
-        print("Place the PDF inside the 'downloads' folder.\n")
+        print("Place the PDF inside a 'downloads' folder in the same directory as the script.\n")
     else:
+        # Create 'downloads' directory if it doesn't exist to avoid errors
+        if not os.path.exists("downloads"):
+            os.makedirs("downloads")
+            print("Created a 'downloads' directory. Please place your PDF inside it and run again.")
+            sys.exit()
         main(sys.argv[1])

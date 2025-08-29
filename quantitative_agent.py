@@ -1,6 +1,7 @@
 import pandas as pd
 import os
 import warnings
+import sys
 import google.generativeai as genai
 from dotenv import load_dotenv
 
@@ -22,14 +23,14 @@ def read_and_parse_data_sheet(excel_path: str):
     Reads the 'Data Sheet' and returns the separated financial statements.
     """
     try:
-        df = pd.read_excel(excel_path, sheet_name='Data Sheet', header=None)
+        df = pd.read_excel(excel_path, sheet_name='Data Sheet', header=None, engine='openpyxl')
 
         # Find all 'Report Date' rows. The first is for annual, the second for quarterly.
         report_date_indices = df[df.iloc[:, 0].astype(str).str.contains('Report Date', na=False)].index
         if len(report_date_indices) < 2:
             print("Error: Could not find both annual and quarterly 'Report Date' rows.")
-            return None, None, None, None
-
+            return None, None, None
+        
         annual_headers_row_index = report_date_indices[0]
         quarterly_headers_row_index = report_date_indices[1]
 
@@ -158,13 +159,27 @@ def analyze_financials(excel_path: str, ticker: str):
 
 
 if __name__ == '__main__':
-    # This block allows the script to be run directly for testing
+    """
+    This block allows the script to be run directly for testing.
+    It checks for command-line arguments first.
+    If two arguments are provided (file_path and ticker), it uses them.
+    Otherwise, it falls back to hardcoded default values.
+    """
     load_dotenv()
-    TICKER = "CUPID"
-    DOWNLOAD_FOLDER = "downloads"
-    file_path = os.path.join(os.getcwd(), DOWNLOAD_FOLDER, f"{TICKER}.xlsx")
-
-    # When run directly, it will print the report to the console
+    
+    # Check if command-line arguments are provided
+    if len(sys.argv) == 3:
+        file_path = sys.argv[1]
+        TICKER = sys.argv[2]
+        print(f"Using command-line arguments: File Path='{file_path}', Ticker='{TICKER}'")
+    else:
+        # Fallback to hardcoded values for direct testing without arguments
+        print("No command-line arguments provided. Falling back to default values.")
+        TICKER = "CUPID"
+        DOWNLOAD_FOLDER = "downloads"
+        file_path = os.path.join(os.getcwd(), DOWNLOAD_FOLDER, f"{TICKER}.xlsx")
+    
+    # Run the analysis and print the report
     report = analyze_financials(file_path, TICKER)
     print("\n--- QUANTITATIVE ANALYSIS REPORT ---")
     print(report)

@@ -13,3 +13,7 @@ __pycache__/
 
 # Visual Studio / VS Code folder
 .vs/
+
+# logs and reports
+logs/
+reports/
