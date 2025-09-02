@@ -1,0 +1,23 @@
+# Core application and UI
+streamlit
+python-dotenv
+
+# LangChain and LangGraph for agentic workflow
+langchain
+langchain-core
+langgraph
+
+# Google Generative AI for LLM access
+google-generativeai
+
+# Web scraping and browser automation
+selenium
+webdriver-manager
+
+# Data handling and Excel parsing
+pandas
+openpyxl
+
+# PDF generation and text extraction
+reportlab
+PyMuPDF

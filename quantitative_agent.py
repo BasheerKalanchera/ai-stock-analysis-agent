@@ -75,7 +75,7 @@ def call_gemini_api(pnl_data: str, balance_sheet_data: str, cash_flow_data: str,
 
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash')
 
         prompt = f"""
         You are an expert quantitative financial analyst. Your task is to provide a detailed analysis of the provided financial statements for the company with ticker: {ticker}.
@@ -107,6 +107,7 @@ def call_gemini_api(pnl_data: str, balance_sheet_data: str, cash_flow_data: str,
         3.  **Cash Flow Analysis:**
             * Analyze the 'Cash from Operating Activity'. Is the company generating consistent cash from its core business?
             * Compare the 'Cash from Operating Activity' to the 'Net Profit'. Are they aligned? A healthy company's operating cash flow is typically close to or higher than its net profit.
+            * Compare the cummulative 'Cash from Operating Activity' to the 'Net Profit' for the period availabe. Is cummulative 'Cash from Operating Activity' more than 70% of cummulative 'Net Profit'?
 
         4.  **Overall Summary:**
             * Provide a brief summary of the company's financial health based on your analysis.

@@ -2,186 +2,210 @@
 import os
 import datetime
 from dotenv import load_dotenv
+from typing import TypedDict, Dict, Any
+
+# --- LangGraph Imports ---
+from langgraph.graph import StateGraph, END
 
 # --- Import Agent Functions ---
 from Screener_Download import download_financial_data
 from qualitative_analysis_agent import run_qualitative_analysis
 from quantitative_agent import analyze_financials
 from synthesis_agent import generate_investment_summary
-# Import the new PDF generator
 from report_generator import create_pdf_report
 
 # --- Page Configuration ---
-st.set_page_config(page_title="AI Stock Analysis Crew", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="AI Stock Analysis Crew (LangGraph)", page_icon="🤖", layout="wide")
 load_dotenv()
 
 # --- Directory Setup ---
 LOG_DIRECTORY = "logs"
 REPORTS_DIRECTORY = "reports"
-for directory in [LOG_DIRECTORY, REPORTS_DIRECTORY]:
+DOWNLOAD_DIRECTORY = "downloads"
+for directory in [LOG_DIRECTORY, REPORTS_DIRECTORY, DOWNLOAD_DIRECTORY]:
     if not os.path.exists(directory):
         os.makedirs(directory)
 
-# --- Logging Function (for Markdown) ---
-def write_to_log(log_file_path, header, content):
-    """Appends a header and content to a specified log file using Markdown formatting."""
+# --- Define Graph State ---
+class StockAnalysisState(TypedDict):
+    ticker: str
+    company_name: str | None
+    file_paths: Dict[str, str]
+    quantitative_results: str | None
+    qualitative_results: Dict[str, Any] | None
+    final_report: str | None
+    log_file: str | None
+    pdf_report_path: str | None
+
+# --- Agent Nodes ---
+def fetch_data_node(state: StockAnalysisState):
+    st.toast("Executing Agent 1: Data Fetcher...")
+    ticker = state['ticker']
+
+    # Use the log file path from the initial state if it exists, otherwise create one.
+    if state.get('log_file'):
+        log_file_path = state['log_file']
+    else:
+        # Fallback in case it's not provided
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        log_filename = f"{ticker}_{timestamp}.md"
+        log_file_path = os.path.join(LOG_DIRECTORY, log_filename)
+
+    download_path = os.path.abspath(DOWNLOAD_DIRECTORY)
+    paths = download_financial_data(ticker, os.getenv("SCREENER_EMAIL"), os.getenv("SCREENER_PASSWORD"), download_path)
+    company_name = paths[0]
+    file_paths = {
+        "excel": os.path.abspath(paths[1]) if paths[1] and os.path.exists(paths[1]) else None,
+        "latest_transcript": os.path.abspath(paths[3]) if paths[3] and os.path.exists(paths[3]) else None,
+        "previous_transcript": os.path.abspath(paths[4]) if paths[4] and os.path.exists(paths[4]) else None
+    }
+    
+    timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    log_header = f"AGENT 1: DOWNLOAD SUMMARY for {company_name or ticker}"
+    log_content = (f"**Timestamp**: {timestamp_str}\n\n"
+                   f"**Excel Path**: `{file_paths['excel'] or 'Download Failed'}`\n\n"
+                   f"**Latest Transcript**: `{file_paths['latest_transcript'] or 'Download Failed'}`\n\n"
+                   f"**Previous Transcript**: `{file_paths['previous_transcript'] or 'Download Failed'}`")
     with open(log_file_path, "a", encoding="utf-8") as f:
-        f.write(f"## {header}\n\n")
-        if isinstance(content, dict):
-            for key, value in content.items():
-                f.write(f"### {key.replace('_', ' ').title()}\n{value}\n\n")
-        else:
-            f.write(f"{str(content)}\n\n")
+        f.write(f"## {log_header}\n\n{log_content}\n\n---\n\n")
+        
+    return {"company_name": company_name, "file_paths": file_paths, "log_file": log_file_path}
+
+def quantitative_analysis_node(state: StockAnalysisState):
+    st.toast("Executing Agent 2: Quantitative Analyst...")
+    excel_file = state['file_paths'].get('excel')
+    if not excel_file or not os.path.exists(excel_file):
+        results = "Quantitative analysis skipped: Excel file not found or download failed."
+    else:
+        results = analyze_financials(excel_file, state['ticker'])
+    with open(state['log_file'], "a", encoding="utf-8") as f:
+        f.write(f"## AGENT 2: QUANTITATIVE ANALYSIS\n\n{results}\n\n---\n\n")
+    return {"quantitative_results": results}
+
+def qualitative_analysis_node(state: StockAnalysisState):
+    st.toast("Executing Agent 3: Qualitative Analyst...")
+    company = state['company_name'] or state['ticker']
+    results = run_qualitative_analysis(company, state['file_paths'].get("latest_transcript"), state['file_paths'].get("previous_transcript"))
+    with open(state['log_file'], "a", encoding="utf-8") as f:
+        f.write("## AGENT 3: QUALITATIVE ANALYSIS\n\n")
+        for key, value in results.items():
+            f.write(f"### {key.replace('_', ' ').title()}\n{value}\n\n")
         f.write("---\n\n")
+    return {"qualitative_results": results}
 
-# --- Session State Initialization ---
-if 'ticker' not in st.session_state: st.session_state.ticker = ""
-if 'company_name' not in st.session_state: st.session_state.company_name = ""
-if 'log_file' not in st.session_state: st.session_state.log_file = ""
-if 'pdf_report_path' not in st.session_state: st.session_state.pdf_report_path = ""
-if 'data_downloaded' not in st.session_state: st.session_state.data_downloaded = False
-if 'qualitative_results' not in st.session_state: st.session_state.qualitative_results = None
-if 'quantitative_results' not in st.session_state: st.session_state.quantitative_results = None
-if 'final_report' not in st.session_state: st.session_state.final_report = None
-if 'file_paths' not in st.session_state: st.session_state.file_paths = {}
+def generate_report_node(state: StockAnalysisState):
+    st.toast("Executing Agent 4: Synthesis Agent...")
+    report = generate_investment_summary(state['company_name'] or state['ticker'], state['quantitative_results'], state['qualitative_results'])
+    with open(state['log_file'], "a", encoding="utf-8") as f:
+        f.write(f"## AGENT 4: FINAL SYNTHESIS REPORT\n\n{report}\n\n---\n\n")
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    report_filename = f"Report_{state['ticker']}_{timestamp}.pdf"
+    pdf_path = os.path.join(REPORTS_DIRECTORY, report_filename)
+    create_pdf_report(state['ticker'], state['company_name'], state['quantitative_results'], state['qualitative_results'], report, pdf_path)
+    return {"final_report": report, "pdf_report_path": pdf_path}
 
+# --- Build the Graph ---
+workflow = StateGraph(StockAnalysisState)
+workflow.add_node("fetch_data", fetch_data_node)
+workflow.add_node("quantitative_analysis", quantitative_analysis_node)
+workflow.add_node("qualitative_analysis", qualitative_analysis_node)
+workflow.add_node("generate_report", generate_report_node)
+workflow.set_entry_point("fetch_data")
+workflow.add_edge("fetch_data", "quantitative_analysis")
+workflow.add_edge("fetch_data", "qualitative_analysis")
+workflow.add_edge(["quantitative_analysis", "qualitative_analysis"], "generate_report")
+workflow.add_edge("generate_report", END)
+app_graph = workflow.compile()
 
-def reset_analysis_state():
-    """Clears all previous results and file paths for a new analysis session."""
-    st.session_state.data_downloaded = False
-    st.session_state.qualitative_results = None
-    st.session_state.quantitative_results = None
-    st.session_state.final_report = None
-    st.session_state.file_paths = {}
-    st.session_state.company_name = ""
-    st.session_state.log_file = ""
-    st.session_state.pdf_report_path = ""
+# --- Streamlit UI ---
+st.title("🤖 AI Stock Analysis Crew (LangGraph Edition)")
+st.header("Automated Investment Analysis Workflow", divider="rainbow")
 
-# --- Sidebar Controls ---
+if 'final_state' not in st.session_state:
+    st.session_state.final_state = None
+if 'ticker' not in st.session_state:
+    st.session_state.ticker = ""
+
 st.sidebar.header("Controls")
 ticker_input = st.sidebar.text_input("Enter Stock Ticker", value="RELIANCE")
 
 if ticker_input.strip().upper() != st.session_state.ticker:
     st.session_state.ticker = ticker_input.strip().upper()
-    reset_analysis_state()
-    st.info(f"Ticker changed to {st.session_state.ticker}. Please run the agents.")
+    st.session_state.final_state = None
 
-# --- Agent Buttons ---
-st.sidebar.subheader("Run Agents Manually")
-
-# Step 1: Data Fetcher
-if st.sidebar.button("Step 1: Download Financial Data"):
+if st.sidebar.button("🚀 Run Full Analysis", type="primary"):
     if st.session_state.ticker:
-        reset_analysis_state()
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        log_filename = f"{st.session_state.ticker}_{timestamp}.md"
-        st.session_state.log_file = os.path.join(LOG_DIRECTORY, log_filename)
+        st.session_state.final_state = None
         
-        DOWNLOAD_DIRECTORY = os.path.join(os.getcwd(), "downloads")
-        if not os.path.exists(DOWNLOAD_DIRECTORY): os.makedirs(DOWNLOAD_DIRECTORY)
+        # 1. PREDICT the log file path before running the graph.
+        ticker = st.session_state.ticker
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        log_filename = f"{ticker}_{timestamp}.md"
+        log_file_path = os.path.join(LOG_DIRECTORY, log_filename)
 
-        with st.spinner(f"Agent 1 (Data Fetcher): Downloading for {st.session_state.ticker}..."):
-            paths = download_financial_data(st.session_state.ticker, os.getenv("SCREENER_EMAIL"), os.getenv("SCREENER_PASSWORD"), DOWNLOAD_DIRECTORY)
-            st.session_state.company_name = paths[0]
-            st.session_state.file_paths = {
-                "excel": paths[1],
-                "latest_transcript": paths[3],
-                "previous_transcript": paths[4]
-            }
-            st.session_state.data_downloaded = True
-            
-            log_header = f"AGENT 1: DOWNLOAD SUMMARY for {st.session_state.company_name or st.session_state.ticker}"
-            log_content = f"**Timestamp**: {timestamp}\n\n**Excel Path**: `{paths[1]}`\n\n**Latest Transcript**: `{paths[3]}`\n\n**Previous Transcript**: `{paths[4]}`"
-            write_to_log(st.session_state.log_file, log_header, log_content)
-
-        st.success(f"Downloads complete. Log saved to: {st.session_state.log_file}")
-        st.rerun()
-
-# Step 2: Quantitative Analysis
-if st.sidebar.button("Step 2: Run Quantitative Analysis", disabled=not st.session_state.data_downloaded):
-    excel_file = st.session_state.file_paths.get("excel")
-    if not excel_file or not os.path.exists(excel_file):
-        st.error("Excel file not found. Please run Step 1.")
+        # 2. PASS the path into the graph's initial state.
+        inputs = {"ticker": st.session_state.ticker, "log_file": log_file_path}
+        
+        with st.status("Running Analysis Crew...", expanded=True) as status:
+            final_state_result = {} 
+            try:
+                # The stream runs, collecting all individual agent outputs
+                for event in app_graph.stream(inputs):
+                    for node_name, node_output in event.items():
+                        if node_name == "fetch_data":
+                            status.update(label="Executing Agent 2 & 3: Quantitative & Qualitative Analysis...")
+                        elif node_name in ["quantitative_analysis", "qualitative_analysis"]:
+                            pass 
+                        elif node_name == "generate_report":
+                            status.update(label="Executing Agent 4: Generating Final Report...")
+                        
+                        # 3. MERGE the output from each node into our final result
+                        if node_output:
+                            final_state_result.update(node_output)
+                
+                st.session_state.final_state = final_state_result
+                status.update(label="Analysis Complete!", state="complete", expanded=False)
+                st.rerun()
+            except Exception as e:
+                status.update(label=f"An error occurred: {e}", state="error")
+                st.error(f"Workflow failed: {e}")
     else:
-        with st.spinner("Agent 2 (Quantitative Analyst): Analyzing financials..."):
-            results = analyze_financials(excel_file, st.session_state.ticker)
-            st.session_state.quantitative_results = results
-            write_to_log(st.session_state.log_file, "AGENT 2: QUANTITATIVE ANALYSIS", results)
-        st.success("Quantitative analysis complete. Results saved to log.")
+        st.sidebar.warning("Please enter a stock ticker.")
 
-# Step 3: Qualitative Analysis
-if st.sidebar.button("Step 3: Run Qualitative Analysis", disabled=not st.session_state.data_downloaded):
-    company = st.session_state.company_name or st.session_state.ticker
-    with st.spinner(f"Agent 3 (Qualitative Analyst): Researching {company}..."):
-        results = run_qualitative_analysis(company, st.session_state.file_paths.get("latest_transcript"), st.session_state.file_paths.get("previous_transcript"))
-        st.session_state.qualitative_results = results
-        write_to_log(st.session_state.log_file, "AGENT 3: QUALITATIVE ANALYSIS", results)
-    st.success("Qualitative analysis complete. Results saved to log.")
-    
-# Step 4: Generate Final Report
-st.sidebar.markdown("---")
-synthesis_disabled = not (st.session_state.quantitative_results or st.session_state.qualitative_results)
-if st.sidebar.button("Step 4: Generate Final Report", type="primary", disabled=synthesis_disabled):
-    with st.spinner("Agent 4 (Synthesis Agent): Compiling final report..."):
-        report = generate_investment_summary(st.session_state.company_name or st.session_state.ticker, st.session_state.quantitative_results, st.session_state.qualitative_results)
-        st.session_state.final_report = report
-        write_to_log(st.session_state.log_file, "AGENT 4: FINAL SYNTHESIS REPORT", report)
-        
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        report_filename = f"Report_{st.session_state.ticker}_{timestamp}.pdf"
-        pdf_path = os.path.join(REPORTS_DIRECTORY, report_filename)
-        
-        create_pdf_report(
-            st.session_state.ticker,
-            st.session_state.company_name,
-            st.session_state.quantitative_results,
-            st.session_state.qualitative_results,
-            st.session_state.final_report,
-            pdf_path
-        )
-        st.session_state.pdf_report_path = pdf_path
-        
-    st.success("Final report generated and saved as PDF.")
+if st.session_state.final_state:
+    final_state = st.session_state.final_state
+    st.header(f"Analysis Results for {final_state.get('company_name') or final_state.get('ticker')}", divider="rainbow")
 
-# --- PDF Download Button ---
-if st.session_state.final_report:
     st.sidebar.markdown("---")
     st.sidebar.subheader("Download Report")
-    with open(st.session_state.pdf_report_path, "rb") as pdf_file:
-        st.sidebar.download_button(
-            label="Download PDF Report",
-            data=pdf_file,
-            file_name=os.path.basename(st.session_state.pdf_report_path),
-            mime="application/pdf"
-        )
-
-# --- Main Display Area ---
-st.title("🤖 AI Stock Analysis Crew")
-st.header(f"Analysis Results for {st.session_state.company_name or st.session_state.ticker}", divider="rainbow")
-
-if st.session_state.final_report:
-    st.subheader("📈📝 Comprehensive Investment Summary")
-    st.markdown(st.session_state.final_report, unsafe_allow_html=True)
-
-with st.expander("📂 View Individual Agent Outputs & Download Status", expanded=False):
-    if st.session_state.data_downloaded:
-        st.subheader("Download Status")
-        st.info(f"Analysis log file: `{st.session_state.log_file}`")
-        files = st.session_state.file_paths
-        st.success(f"**Excel Report:** `{files.get('excel', 'Not found')}`")
-        st.info(f"**Latest Transcript:** `{files.get('latest_transcript', 'Not found')}`")
-        st.info(f"**Previous Transcript:** `{files.get('previous_transcript', 'Not found')}`")
+    
+    # Add a check for pdf_report_path before trying to open it
+    if final_state.get('pdf_report_path') and os.path.exists(final_state['pdf_report_path']):
+        with open(final_state['pdf_report_path'], "rb") as pdf_file:
+            st.sidebar.download_button(
+                label="Download PDF Report",
+                data=pdf_file,
+                file_name=os.path.basename(final_state['pdf_report_path']),
+                mime="application/pdf"
+            )
     else:
-        st.info("Start by entering a stock ticker and clicking 'Step 1: Download Financial Data' in the sidebar.")
+        st.sidebar.error("PDF Report not found.")
 
-    if st.session_state.quantitative_results:
-        st.subheader("📈 Quantitative Insights")
-        st.markdown(st.session_state.quantitative_results)
+    if final_state.get('final_report'):
+        st.subheader("📈📝 Comprehensive Investment Summary")
+        st.markdown(final_state['final_report'], unsafe_allow_html=True)
 
-    if st.session_state.qualitative_results:
-        st.subheader("📝 Qualitative Insights")
-        qual_results = st.session_state.qualitative_results
-        st.markdown(f"**Positives & Concerns:** {qual_results.get('positives_and_concerns', 'N/A')}")
-        st.markdown(f"**QoQ Comparison:** {qual_results.get('qoq_comparison', 'N/A')}")
-        st.markdown(f"**Scuttlebutt Analysis:** {qual_results.get('scuttlebutt', 'N/A')}")
-        st.markdown(f"**SEBI Check:** {qual_results.get('sebi_check', 'N/A')}")
+    with st.expander("📂 View Individual Agent Outputs & Logs", expanded=False):
+        st.info(f"Full analysis log file: `{final_state.get('log_file', 'N/A')}`")
+        if final_state.get('quantitative_results'):
+            st.subheader("📈 Quantitative Insights")
+            st.markdown(final_state['quantitative_results'])
+        if final_state.get('qualitative_results'):
+            st.subheader("📝 Qualitative Insights")
+            qual_results = final_state['qualitative_results']
+            st.markdown(f"**Positives & Concerns:** {qual_results.get('positives_and_concerns', 'N/A')}")
+            st.markdown(f"**QoQ Comparison:** {qual_results.get('qoq_comparison', 'N/A')}")
+            st.markdown(f"**Scuttlebutt Analysis:** {qual_results.get('scuttlebutt', 'N/A')}")
+            st.markdown(f"**SEBI Check:** {qual_results.get('sebi_check', 'N/A')}")
+else:
+    st.info("Enter a stock ticker in the sidebar and click 'Run Full Analysis' to begin.")

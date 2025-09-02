@@ -20,6 +20,13 @@ try:
 except (ValueError, Exception) as e:
     print(f"Qualitative Agent Error: Could not configure Google API Key. {e}")
 
+# NEW: Load model names from .env or use defaults
+# For simpler tasks like transcript summaries
+LITE_MODEL_NAME = os.getenv("LITE_MODEL_NAME", "gemini-1.5-flash")
+# For complex, web-research tasks
+HEAVY_MODEL_NAME = os.getenv("HEAVY_MODEL_NAME", "gemini-1.5-pro")
+print(f"Qualitative Agent: Using Lite Model '{LITE_MODEL_NAME}' and Heavy Model '{HEAVY_MODEL_NAME}'.")
+
 
 # --- Core Functions ---
 
@@ -33,15 +40,16 @@ def _extract_text_from_pdf_path(pdf_path: str) -> str:
         print(f"Error reading PDF file '{pdf_path}': {e}")
         return ""
 
-def _analyze_with_gemini(prompt: str, analysis_type: str) -> str:
-    """Generic function to call the Gemini model with a given prompt."""
+# MODIFIED: The function now accepts a 'model_name' parameter
+def _analyze_with_gemini(prompt: str, analysis_type: str, model_name: str) -> str:
+    """Generic function to call the Gemini model with a given prompt and model name."""
     if not API_KEY_CONFIGURED:
         return f"Analysis skipped for '{analysis_type}': Google API Key is not configured."
     
-    print(f"Qualitative Agent: Starting '{analysis_type}' analysis...")
+    print(f"Qualitative Agent: Starting '{analysis_type}' analysis with model '{model_name}'...")
     try:
-        # Using a specific model, you can change it if needed e.g., 'gemini-pro'
-        model = genai.GenerativeModel('gemini-2.0-flash')
+        # MODIFIED: The model is now dynamically selected based on the parameter
+        model = genai.GenerativeModel(model_name)
         response = model.generate_content(prompt)
         print(f"Qualitative Agent: Finished '{analysis_type}' analysis.")
         return response.text
@@ -78,7 +86,8 @@ def _compare_transcripts(latest_transcript: str, previous_transcript: str) -> st
 
     Directly quote relevant phrases from BOTH transcripts to support your points.
     """
-    return _analyze_with_gemini(prompt, "Quarter-over-Quarter Comparison")
+    # MODIFIED: Now passes the LITE_MODEL_NAME for this task
+    return _analyze_with_gemini(prompt, "Quarter-over-Quarter Comparison", LITE_MODEL_NAME)
 
 def _analyze_positives_and_concerns(transcript_text: str) -> str:
     """Analyzes a single transcript for positives and concerns."""
@@ -93,7 +102,8 @@ def _analyze_positives_and_concerns(transcript_text: str) -> str:
     {transcript_text}
     ---
     """
-    return _analyze_with_gemini(prompt, "Positives & Concerns")
+    # MODIFIED: Now passes the LITE_MODEL_NAME for this task
+    return _analyze_with_gemini(prompt, "Positives & Concerns", LITE_MODEL_NAME)
 
 def _perform_scuttlebutt_analysis(company_name: str) -> str:
     """Uses the Gemini model to perform an online scuttlebutt analysis."""
@@ -117,7 +127,8 @@ def _perform_scuttlebutt_analysis(company_name: str) -> str:
 
     Provide a final summary of your overall impression. Use Markdown for formatting.
     """
-    return _analyze_with_gemini(prompt, f"Scuttlebutt Analysis for {company_name}")
+    # MODIFIED: Now passes the HEAVY_MODEL_NAME for this more complex task
+    return _analyze_with_gemini(prompt, f"Scuttlebutt Analysis for {company_name}", HEAVY_MODEL_NAME)
 
 def _check_sebi_violations(company_name: str) -> str:
     """Uses the Gemini model to check for SEBI violations for a given company."""
@@ -133,7 +144,8 @@ def _check_sebi_violations(company_name: str) -> str:
 
     Please summarize your findings. If there are notable issues, provide a brief description and, if possible, the year of the event. If no significant violations are found in publicly accessible records, please state that clearly.
     """
-    return _analyze_with_gemini(prompt, f"SEBI Violations Check for {company_name}")
+    # MODIFIED: Now passes the HEAVY_MODEL_NAME for this more complex task
+    return _analyze_with_gemini(prompt, f"SEBI Violations Check for {company_name}", HEAVY_MODEL_NAME)
 
 
 def run_qualitative_analysis(company_name: str, latest_transcript_path: str | None, previous_transcript_path: str | None) -> dict:
@@ -176,4 +188,3 @@ def run_qualitative_analysis(company_name: str, latest_transcript_path: str | No
         results["sebi_check"] = _check_sebi_violations(company_name)
     
     return results
-
