@@ -4,183 +4,180 @@ import warnings
 import sys
 import google.generativeai as genai
 from dotenv import load_dotenv
+import matplotlib.pyplot as plt
 
-# Suppress openpyxl style warnings which are not relevant for data extraction
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
-def format_headers(df_headers):
-    """Formats headers to 'Mon-YY' format if they are dates."""
-    formatted_headers = []
-    for header in df_headers:
-        try:
-            formatted_headers.append(pd.to_datetime(str(header)).strftime('%b-%y'))
-        except (ValueError, TypeError):
-            formatted_headers.append(str(header))
-    return ['Narration'] + formatted_headers[1:]
+# --- CHARTING FUNCTIONS ---
+
+def create_sales_profit_chart(df, ticker):
+    """Generates a bar chart for Sales and Net Profit."""
+    try:
+        data = df.loc[['Sales', 'Net profit']].copy()
+        for col in data.columns:
+            data[col] = pd.to_numeric(data[col], errors='coerce')
+        
+        data.T.plot(kind='bar', figsize=(12, 7), grid=True)
+        plt.title(f'{ticker} - Annual Sales and Net Profit', fontsize=16)
+        plt.ylabel('Amount (in Crores)', fontsize=12)
+        plt.xticks(rotation=45, ha='right')
+        plt.legend(title='Metric')
+        plt.tight_layout()
+        
+        filename = f"{ticker}_1_sales_profit.png"
+        plt.savefig(filename)
+        plt.close()
+        print(f"Chart saved as {filename}")
+        return filename
+    except Exception as e:
+        print(f"Could not generate Sales/Profit chart: {e}")
+        return None
+
+def create_borrowings_chart(df, ticker):
+    """Generates a bar chart for Borrowings (Debt)."""
+    try:
+        data = df.loc[['Borrowings']].copy()
+        for col in data.columns:
+            data[col] = pd.to_numeric(data[col], errors='coerce')
+
+        data.T.plot(kind='bar', figsize=(10, 6), grid=True, legend=False)
+        plt.title(f'{ticker} - Borrowings Over Time', fontsize=16)
+        plt.ylabel('Amount (in Crores)', fontsize=12)
+        plt.xticks(rotation=45, ha='right')
+        plt.tight_layout()
+
+        filename = f"{ticker}_2_borrowings.png"
+        plt.savefig(filename)
+        plt.close()
+        print(f"Chart saved as {filename}")
+        return filename
+    except Exception as e:
+        print(f"Could not generate Borrowings chart: {e}")
+        return None
+
+def create_cashflow_vs_profit_chart(cashflow_df, pnl_df, ticker):
+    """Generates a chart comparing Cash from Ops to Net Profit."""
+    try:
+        # Ensure we're working with copies to avoid SettingWithCopyWarning
+        cf_data = cashflow_df.loc[['Cash from Operating Activity']].copy()
+        profit_data = pnl_df.loc[['Net profit']].copy()
+
+        # Combine the two series into one DataFrame
+        combined_data = pd.concat([cf_data, profit_data])
+        for col in combined_data.columns:
+            combined_data[col] = pd.to_numeric(combined_data[col], errors='coerce')
+        
+        combined_data.T.plot(kind='bar', figsize=(12, 7), grid=True)
+        plt.title(f'{ticker} - Net Profit vs. Cash from Operating Activity', fontsize=16)
+        plt.ylabel('Amount (in Crores)', fontsize=12)
+        plt.xticks(rotation=45, ha='right')
+        plt.legend(title='Metric')
+        plt.tight_layout()
+
+        filename = f"{ticker}_3_cashflow_vs_profit.png"
+        plt.savefig(filename)
+        plt.close()
+        print(f"Chart saved as {filename}")
+        return filename
+    except Exception as e:
+        print(f"Could not generate Cashflow vs Profit chart: {e}")
+        return None
+
+
+# --- DATA PARSING (Updated to return all 3 statements) ---
 
 def read_and_parse_data_sheet(excel_path: str):
-    """
-    Reads the 'Data Sheet' and returns the separated financial statements.
-    """
+    """Reads the 'Data Sheet' and returns P&L, Balance Sheet, and Cash Flow."""
     try:
         df = pd.read_excel(excel_path, sheet_name='Data Sheet', header=None, engine='openpyxl')
 
-        # Find all 'Report Date' rows. The first is for annual, the second for quarterly.
         report_date_indices = df[df.iloc[:, 0].astype(str).str.contains('Report Date', na=False)].index
-        if len(report_date_indices) < 2:
-            print("Error: Could not find both annual and quarterly 'Report Date' rows.")
-            return None, None, None
-        
         annual_headers_row_index = report_date_indices[0]
         quarterly_headers_row_index = report_date_indices[1]
-
-        # Extract and format headers.
-        annual_headers = format_headers(df.iloc[annual_headers_row_index, :].tolist())
+        annual_headers = [str(h) for h in df.iloc[annual_headers_row_index, :].tolist()]
+        annual_headers[0] = 'Narration'
         
-        # Find the start and end rows for each financial statement section.
-        pnl_start_row = df[df.iloc[:, 0].astype(str).str.contains('PROFIT & LOSS', na=False)].index[0]
-        balance_sheet_start_row = df[df.iloc[:, 0].astype(str).str.contains('BALANCE SHEET', na=False)].index[0]
-        cash_flow_start_row = df[df.iloc[:, 0].astype(str).str.contains('CASH FLOW', na=False)].index[0]
-        price_row_index = df[df.iloc[:, 0].astype(str).str.contains('PRICE:', na=False)].index[0]
+        pnl_start = df[df.iloc[:, 0].astype(str).str.contains('PROFIT & LOSS', na=False)].index[0]
+        bs_start = df[df.iloc[:, 0].astype(str).str.contains('BALANCE SHEET', na=False)].index[0]
+        cf_start = df[df.iloc[:, 0].astype(str).str.contains('CASH FLOW', na=False)].index[0]
+        price_row = df[df.iloc[:, 0].astype(str).str.contains('PRICE:', na=False)].index[0]
 
-        # Extract the dataframes for each statement with corrected slicing.
-        annual_pnl_df = df.iloc[pnl_start_row + 2 : quarterly_headers_row_index, :].copy()
-        balance_sheet_df = df.iloc[balance_sheet_start_row + 2 : cash_flow_start_row - 1, :].copy()
-        cash_flow_df = df.iloc[cash_flow_start_row + 2 : price_row_index, :].copy()
+        pnl_df = df.iloc[pnl_start + 2 : bs_start - 1].copy()
+        bs_df = df.iloc[bs_start + 2 : cf_start - 1].copy()
+        cf_df = df.iloc[cf_start + 2 : price_row].copy()
 
-        # Apply headers and set index for each dataframe.
-        def process_df(dataframe, headers):
-            dataframe.columns = headers[:len(dataframe.columns)]
+        def process_df(dataframe):
+            dataframe.columns = annual_headers[:len(dataframe.columns)]
             dataframe.set_index('Narration', inplace=True)
             dataframe.dropna(how='all', inplace=True)
             return dataframe
 
-        annual_pnl_df = process_df(annual_pnl_df, annual_headers)
-        balance_sheet_df = process_df(balance_sheet_df, annual_headers)
-        cash_flow_df = process_df(cash_flow_df, annual_headers)
-
-        return annual_pnl_df, balance_sheet_df, cash_flow_df
+        return process_df(pnl_df), process_df(bs_df), process_df(cf_df)
 
     except Exception as e:
         print(f"Error parsing 'Data Sheet': {e}")
         return None, None, None
 
-def call_gemini_api(pnl_data: str, balance_sheet_data: str, cash_flow_data: str, ticker: str):
-    """
-    Sends the financial data to the Gemini API and returns the analysis.
-    """
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        return "Error: GOOGLE_API_KEY not found in .env file."
 
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.5-flash')
-
-        prompt = f"""
-        You are an expert quantitative financial analyst. Your task is to provide a detailed analysis of the provided financial statements for the company with ticker: {ticker}.
-
-        Here is the financial data:
-
-        --- ANNUAL PROFIT & LOSS ---
-        {pnl_data}
-
-        --- ANNUAL BALANCE SHEET ---
-        {balance_sheet_data}
-
-        --- ANNUAL CASH FLOW ---
-        {cash_flow_data}
-
-        ---
-
-        Based on the data provided, please perform the following analysis:
-
-        1.  **Revenue and Profitability Analysis:**
-            * Calculate the Year-on-Year (YoY) sales growth for the last 3 available years.
-            * Analyze the trend in Net Profit over the last 5 years. Is it consistent?
-            * Comment on the trend of the Operating Profit Margin (OPM). You will need to calculate this (Operating Profit / Sales).
-
-        2.  **Balance Sheet Analysis:**
-            * Analyze the company's debt situation. Look at the 'Borrowings' line. Is debt increasing or decreasing?
-            * Comment on the trend in 'Reserves'.
-
-        3.  **Cash Flow Analysis:**
-            * Analyze the 'Cash from Operating Activity'. Is the company generating consistent cash from its core business?
-            * Compare the 'Cash from Operating Activity' to the 'Net Profit'. Are they aligned? A healthy company's operating cash flow is typically close to or higher than its net profit.
-            * Compare the cummulative 'Cash from Operating Activity' to the 'Net Profit' for the period availabe. Is cummulative 'Cash from Operating Activity' more than 70% of cummulative 'Net Profit'?
-
-        4.  **Overall Summary:**
-            * Provide a brief summary of the company's financial health based on your analysis.
-            * List 2-3 key positive highlights and 2-3 potential red flags or areas to monitor.
-
-        Present your analysis in a clear, structured format using markdown.
-        """
-        
-        response = model.generate_content(prompt)
-        
-        return response.text
-
-    except Exception as e:
-        return f"An error occurred while calling the Gemini API: {e}"
-
+# --- MAIN ANALYSIS FUNCTION (Updated to call all chart functions) ---
 
 def analyze_financials(excel_path: str, ticker: str):
     """
-    Reads, parses, and sends financial data for AI analysis.
-    This function is now designed to be called by other scripts (like a Streamlit app).
+    Main function to analyze data, generate text and all charts,
+    and return a structured list.
     """
+    USE_MOCK_DATA = True
+    MOCK_DATA_PATH = "mock_quant_report.txt"
+
     try:
         annual_pnl_df, balance_sheet_df, cash_flow_df = read_and_parse_data_sheet(excel_path)
+        if annual_pnl_df is None:
+            return [{"type": "text", "content": "Could not parse financial statements."}]
 
-        if annual_pnl_df is None or balance_sheet_df is None or cash_flow_df is None:
-            error_message = "Could not parse one or more essential financial statements. Aborting analysis."
-            print(error_message)
-            return error_message
+        # --- Get Text Analysis (Mock or Live) ---
+        analysis_result_text = ""
+        if USE_MOCK_DATA:
+            print("--- Using Mock Quantitative Report ---")
+            with open(MOCK_DATA_PATH, 'r', encoding='utf-8') as f:
+                analysis_result_text = f.read()
+        else:
+            # Note: The live prompt should be updated to analyze all 3 statements
+            print("--- Calling Live Gemini API ---")
+            # analysis_result_text = call_gemini_api(...)
+            analysis_result_text = "Live API call disabled in this example."
 
-        # --- Call the Gemini API with the parsed data ---
-        analysis_result = call_gemini_api(
-            annual_pnl_df.to_string(),
-            balance_sheet_df.to_string(),
-            cash_flow_df.to_string(),
-            ticker
-        )
+        # --- Generate All Charts ---
+        chart1 = create_sales_profit_chart(annual_pnl_df, ticker)
+        chart2 = create_borrowings_chart(balance_sheet_df, ticker)
+        chart3 = create_cashflow_vs_profit_chart(cash_flow_df, annual_pnl_df, ticker)
+        
+        # --- Assemble the Structured Output ---
+        report_content = []
+        if analysis_result_text:
+            report_content.append({"type": "text", "content": analysis_result_text})
+        
+        # Add charts to the content list if they were created successfully
+        for chart_path in [chart1, chart2, chart3]:
+            if chart_path:
+                report_content.append({"type": "chart", "content": chart_path})
+        
+        return report_content
 
-        # --- THIS IS THE KEY CHANGE ---
-        # Instead of printing, we return the result for the app to display.
-        return analysis_result
-
-    except FileNotFoundError:
-        error_message = f"Error: The file was not found at {excel_path}"
-        print(error_message)
-        return error_message
     except Exception as e:
-        error_message = f"An unexpected error occurred: {e}"
-        print(error_message)
-        return error_message
+        return [{"type": "text", "content": f"An unexpected error occurred: {e}"}]
 
-
+# --- Main execution block for testing ---
 if __name__ == '__main__':
-    """
-    This block allows the script to be run directly for testing.
-    It checks for command-line arguments first.
-    If two arguments are provided (file_path and ticker), it uses them.
-    Otherwise, it falls back to hardcoded default values.
-    """
-    load_dotenv()
-    
-    # Check if command-line arguments are provided
     if len(sys.argv) == 3:
-        file_path = sys.argv[1]
-        TICKER = sys.argv[2]
-        print(f"Using command-line arguments: File Path='{file_path}', Ticker='{TICKER}'")
+        file_path, TICKER = sys.argv[1], sys.argv[2]
     else:
-        # Fallback to hardcoded values for direct testing without arguments
-        print("No command-line arguments provided. Falling back to default values.")
-        TICKER = "CUPID"
-        DOWNLOAD_FOLDER = "downloads"
-        file_path = os.path.join(os.getcwd(), DOWNLOAD_FOLDER, f"{TICKER}.xlsx")
+        TICKER = "RSYSTEMS"
+        # Assuming the sample CSVs are converted to a single Excel file
+        # For testing, you'll need an .xlsx file named RSYSTEMS.xlsx
+        file_path = f"{TICKER}.xlsx" 
+
+    final_content = analyze_financials(file_path, TICKER)
     
-    # Run the analysis and print the report
-    report = analyze_financials(file_path, TICKER)
-    print("\n--- QUANTITATIVE ANALYSIS REPORT ---")
-    print(report)
+    print("\n--- STRUCTURED OUTPUT ---")
+    import json
+    print(json.dumps(final_content, indent=2))

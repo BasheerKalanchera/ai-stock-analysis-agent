@@ -17,3 +17,7 @@ __pycache__/
 # logs and reports
 logs/
 reports/
+
+# Ignore generated image files
+*.png
+
