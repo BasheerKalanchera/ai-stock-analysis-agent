@@ -110,13 +110,13 @@ def _perform_scuttlebutt_analysis(company_name: str) -> str:
     prompt = f"""
     As a world-class financial analyst following Philip Fisher's "Scuttlebutt" method, conduct a deep investigation into the company: **{company_name}**.
     
-    Your goal is to gather qualitative insights that are not typically found in financial statements. Search for and synthesize information from a wide range of sources including:
-    - Recent news articles (last 6-12 months)
-    - Industry reports and forums
-    - Employee reviews (e.g., Glassdoor)
-    - Customer feedback and reviews
-    - Management interviews or public statements
-    - Supply chain or partner commentary
+    Your goal is to gather qualitative insights that are not typically found in financial statements. Search for and synthesize the most up-to-date information available as of **September 2025** from a wide range of sources including:
+    - Recent news articles, focusing on the period from **late 2024 to the present day**
+    - The latest industry reports and forum discussions
+    - Employee reviews (e.g., Glassdoor) posted within the last year
+    - Recent customer feedback and reviews
+    - Management interviews or public statements from **2025**
+    - Any recent supply chain or partner commentary
     
     **Synthesize your findings into a concise report covering these key areas:**
     1.  **Competitive Landscape:** How is the company positioned against its main competitors? What are its key competitive advantages (moat)?

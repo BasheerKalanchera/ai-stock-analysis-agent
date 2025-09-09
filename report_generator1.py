@@ -1,13 +1,14 @@
-﻿import datetime
+import datetime
 import re
 import argparse
 import os
 from reportlab.lib.pagesizes import letter
+# --- NEW: Import the Image class ---
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable, Image, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 from reportlab.lib import colors
-import io
+
 
 def clean_and_format_text(text):
     """
@@ -32,7 +33,7 @@ def parse_markdown_table(md_table: str):
     rows = []
     for line in lines:
         if set(line.replace("|", "").strip()) <= set("-:"):
-            continue
+            continue  # skip separator line
         parts = [c.strip() for c in line.strip("|").split("|")]
         rows.append(parts)
     return rows
@@ -62,6 +63,7 @@ def create_pdf_report(ticker, company_name, quant_results, qual_results, final_r
     doc = SimpleDocTemplate(file_path, pagesize=letter)
     styles = getSampleStyleSheet()
 
+    # --- Custom Styles ---
     title_style = ParagraphStyle('Title', parent=styles['h1'], fontName='Helvetica-Bold', fontSize=20, alignment=TA_CENTER, textColor=colors.navy)
     subtitle_style = ParagraphStyle('Subtitle', parent=styles['h2'], fontName='Helvetica', fontSize=12, alignment=TA_CENTER, textColor=colors.black)
     heading_style = ParagraphStyle('Heading2', parent=styles['h2'], fontName='Helvetica-Bold', fontSize=14, spaceBefore=12, spaceAfter=6, textColor=colors.navy)
@@ -71,9 +73,10 @@ def create_pdf_report(ticker, company_name, quant_results, qual_results, final_r
 
     story = []
 
+    # --- Helper function to add content to the story ---
     def add_content(text, style):
         cleaned_text = clean_and_format_text(text)
-        blocks = cleaned_text.split("\n\n")
+        blocks = cleaned_text.split("\n\n")  # split into chunks
 
         for block in blocks:
             rows = parse_markdown_table(block)
@@ -90,6 +93,7 @@ def create_pdf_report(ticker, company_name, quant_results, qual_results, final_r
                     elif line.strip():
                         story.append(Paragraph(line, style))
 
+    # --- Build the Story ---
     story.append(Paragraph(f"Investment Analysis Report: {company_name or ticker}", title_style))
     story.append(Paragraph(f"Generated on: {datetime.datetime.now().strftime('%d-%B-%Y %H:%M')}", subtitle_style))
     story.append(Spacer(1, 24))
@@ -100,8 +104,10 @@ def create_pdf_report(ticker, company_name, quant_results, qual_results, final_r
         story.append(HRFlowable(width="100%", thickness=1, color=colors.navy))
         story.append(Spacer(1, 12))
 
+    # --- Quantitative Analysis ---
     if quant_results:
-        story.append(Paragraph("Detailed Quantitative Analysis Report", heading_style))
+        story.append(Paragraph("Quantitative Analysis", heading_style))
+
         if isinstance(quant_results, list):
             for item in quant_results:
                 item_type = item.get("type")
@@ -110,20 +116,16 @@ def create_pdf_report(ticker, company_name, quant_results, qual_results, final_r
                 if item_type == "text" and content:
                     add_content(content, body_style)
                     story.append(Spacer(1, 6))
-                elif item_type == "chart" and content:
-                    # Check if the content is a BytesIO object (in-memory) or a file path (string)
-                    if isinstance(content, io.BytesIO):
-                        story.append(Image(content, width=450, height=250))
-                        story.append(Spacer(1, 12))
-                    elif isinstance(content, str) and os.path.exists(content):
-                        story.append(Image(content, width=450, height=250))
-                        story.append(Spacer(1, 12))
+                elif item_type == "chart" and content and os.path.exists(content):
+                    story.append(Image(content, width=450, height=250))
+                    story.append(Spacer(1, 12))
         else:
             add_content(quant_results, body_style)
+
         story.append(Spacer(1, 12))
 
     if qual_results and isinstance(qual_results, dict):
-        story.append(Paragraph("Detailed Qualitative Analysis Report", heading_style))
+        story.append(Paragraph("Qualitative Analysis", heading_style))
         for key, value in qual_results.items():
             if value:
                 section_title = key.replace('_', ' ').title()
@@ -139,6 +141,8 @@ def create_pdf_report(ticker, company_name, quant_results, qual_results, final_r
         print(f"Error creating PDF report: {e}")
         return False
 
+
+# --- (The rest of the file remains the same) ---
 def parse_md_report(md_content):
     # ... (no changes needed here)
     pass

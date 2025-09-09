@@ -58,10 +58,10 @@ def download_financial_data(ticker: str, email: str, password: str, download_pat
         print("Login successful.")
 
         print(f"Navigating to the main company page for {ticker}...")
-        if ticker.isdigit():
-            company_url = f"https://www.screener.in/company/{ticker}/"
-        else:
-            company_url = f"https://www.screener.in/company/{ticker}/consolidated/"
+        #if ticker.isdigit():
+        company_url = f"https://www.screener.in/company/{ticker}/"
+        #else:
+        #    company_url = f"https://www.screener.in/company/{ticker}/consolidated/"
         
         driver.get(company_url)
 
@@ -115,7 +115,8 @@ def download_financial_data(ticker: str, email: str, password: str, download_pat
             # Download latest transcript
             files_before = os.listdir(download_path)
             driver.execute_script("arguments[0].click();", transcript_elems[0])
-            print("Initiating Latest Concall Transcript download...")
+            print("Initiating Latest Concall Transcript download and Waiting for 2 seconds for the download to complete...")
+            time.sleep(2)
             new_filename = wait_for_new_file(download_path, files_before)
             if new_filename:
                 _, ext = os.path.splitext(new_filename)
@@ -130,7 +131,8 @@ def download_financial_data(ticker: str, email: str, password: str, download_pat
                 files_before = os.listdir(download_path)
                 transcript_elems = driver.find_elements(By.XPATH, transcripts_xpath) # Re-find to avoid stale element
                 driver.execute_script("arguments[0].click();", transcript_elems[1])
-                print("Initiating Previous Concall Transcript download...")
+                print("Initiating Previous Concall Transcript download and Waiting for 2 seconds for the download to complete...")
+                time.sleep(2)
                 new_filename = wait_for_new_file(download_path, files_before)
                 if new_filename:
                     _, ext = os.path.splitext(new_filename)

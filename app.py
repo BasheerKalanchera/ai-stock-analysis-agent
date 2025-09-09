@@ -2,7 +2,7 @@
 import os
 import datetime
 from dotenv import load_dotenv
-from typing import TypedDict, Dict, Any
+from typing import TypedDict, Dict, Any, List
 
 # --- LangGraph Imports ---
 from langgraph.graph import StateGraph, END
@@ -31,7 +31,10 @@ class StockAnalysisState(TypedDict):
     ticker: str
     company_name: str | None
     file_paths: Dict[str, str]
-    quantitative_results: str | None
+    # NEW: Structured output from quant agent (text + charts) for the PDF
+    quant_results_structured: List[Dict[str, Any]] | None
+    # NEW: Text-only output for the synthesis agent and logs
+    quant_text_for_synthesis: str | None
     qualitative_results: Dict[str, Any] | None
     final_report: str | None
     log_file: str | None
@@ -74,13 +77,24 @@ def fetch_data_node(state: StockAnalysisState):
 def quantitative_analysis_node(state: StockAnalysisState):
     st.toast("Executing Agent 2: Quantitative Analyst...")
     excel_file = state['file_paths'].get('excel')
+    
     if not excel_file or not os.path.exists(excel_file):
-        results = "Quantitative analysis skipped: Excel file not found or download failed."
+        text_results = "Quantitative analysis skipped: Excel file not found or download failed."
+        structured_results = [{"type": "text", "content": text_results}]
     else:
-        results = analyze_financials(excel_file, state['ticker'])
+        # MODIFIED: Get structured results (text and chart paths)
+        structured_results = analyze_financials(excel_file, state['ticker'])
+        # MODIFIED: Create a text-only version for synthesis and logging
+        text_results = "\n".join([item['content'] for item in structured_results if item['type'] == 'text'])
+
     with open(state['log_file'], "a", encoding="utf-8") as f:
-        f.write(f"## AGENT 2: QUANTITATIVE ANALYSIS\n\n{results}\n\n---\n\n")
-    return {"quantitative_results": results}
+        f.write(f"## AGENT 2: QUANTITATIVE ANALYSIS\n\n{text_results}\n\n---\n\n")
+        
+    # MODIFIED: Return both structured and text-only results
+    return {
+        "quant_results_structured": structured_results,
+        "quant_text_for_synthesis": text_results
+    }
 
 def qualitative_analysis_node(state: StockAnalysisState):
     st.toast("Executing Agent 3: Qualitative Analyst...")
@@ -93,28 +107,55 @@ def qualitative_analysis_node(state: StockAnalysisState):
         f.write("---\n\n")
     return {"qualitative_results": results}
 
-def generate_report_node(state: StockAnalysisState):
+# NEW/RENAMED: This node now just handles the synthesis step.
+def synthesis_node(state: StockAnalysisState):
     st.toast("Executing Agent 4: Synthesis Agent...")
-    report = generate_investment_summary(state['company_name'] or state['ticker'], state['quantitative_results'], state['qualitative_results'])
+    # MODIFIED: Use the text-only quantitative results for synthesis
+    report = generate_investment_summary(
+        state['company_name'] or state['ticker'],
+        state['quant_text_for_synthesis'], # <-- USES TEXT-ONLY
+        state['qualitative_results']
+    )
     with open(state['log_file'], "a", encoding="utf-8") as f:
         f.write(f"## AGENT 4: FINAL SYNTHESIS REPORT\n\n{report}\n\n---\n\n")
+    return {"final_report": report}
+
+# NEW: This node is now dedicated to generating the final PDF report.
+def generate_report_node(state: StockAnalysisState):
+    st.toast("Executing Agent 5: Report Generator...")
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     report_filename = f"Report_{state['ticker']}_{timestamp}.pdf"
     pdf_path = os.path.join(REPORTS_DIRECTORY, report_filename)
-    create_pdf_report(state['ticker'], state['company_name'], state['quantitative_results'], state['qualitative_results'], report, pdf_path)
-    return {"final_report": report, "pdf_report_path": pdf_path}
+    
+    # MODIFIED: Use the structured quantitative results for the PDF
+    create_pdf_report(
+        ticker=state['ticker'],
+        company_name=state['company_name'],
+        quant_results=state['quant_results_structured'], # <-- USES STRUCTURED DATA
+        qual_results=state['qualitative_results'],
+        final_report=state['final_report'],
+        file_path=pdf_path
+    )
+    return {"pdf_report_path": pdf_path}
 
 # --- Build the Graph ---
 workflow = StateGraph(StockAnalysisState)
 workflow.add_node("fetch_data", fetch_data_node)
 workflow.add_node("quantitative_analysis", quantitative_analysis_node)
 workflow.add_node("qualitative_analysis", qualitative_analysis_node)
+# MODIFIED: Renamed and added nodes
+workflow.add_node("synthesis", synthesis_node)
 workflow.add_node("generate_report", generate_report_node)
+
 workflow.set_entry_point("fetch_data")
+
+# MODIFIED: Adjusted graph flow
 workflow.add_edge("fetch_data", "quantitative_analysis")
 workflow.add_edge("fetch_data", "qualitative_analysis")
-workflow.add_edge(["quantitative_analysis", "qualitative_analysis"], "generate_report")
+workflow.add_edge(["quantitative_analysis", "qualitative_analysis"], "synthesis")
+workflow.add_edge("synthesis", "generate_report")
 workflow.add_edge("generate_report", END)
+
 app_graph = workflow.compile()
 
 # --- Streamlit UI ---
@@ -154,10 +195,10 @@ if st.sidebar.button("🚀 Run Full Analysis", type="primary"):
                     for node_name, node_output in event.items():
                         if node_name == "fetch_data":
                             status.update(label="Executing Agent 2 & 3: Quantitative & Qualitative Analysis...")
-                        elif node_name in ["quantitative_analysis", "qualitative_analysis"]:
-                            pass 
+                        elif node_name == "synthesis":
+                            status.update(label="Executing Agent 4: Generating Final Summary...")
                         elif node_name == "generate_report":
-                            status.update(label="Executing Agent 4: Generating Final Report...")
+                             status.update(label="Executing Agent 5: Creating PDF Report...")
                         
                         # 3. MERGE the output from each node into our final result
                         if node_output:
@@ -197,15 +238,15 @@ if st.session_state.final_state:
 
     with st.expander("📂 View Individual Agent Outputs & Logs", expanded=False):
         st.info(f"Full analysis log file: `{final_state.get('log_file', 'N/A')}`")
-        if final_state.get('quantitative_results'):
+        # MODIFIED: Display the text-only version of quant results
+        if final_state.get('quant_text_for_synthesis'):
             st.subheader("📈 Quantitative Insights")
-            st.markdown(final_state['quantitative_results'])
+            st.markdown(final_state['quant_text_for_synthesis'])
         if final_state.get('qualitative_results'):
             st.subheader("📝 Qualitative Insights")
             qual_results = final_state['qualitative_results']
-            st.markdown(f"**Positives & Concerns:** {qual_results.get('positives_and_concerns', 'N/A')}")
-            st.markdown(f"**QoQ Comparison:** {qual_results.get('qoq_comparison', 'N/A')}")
-            st.markdown(f"**Scuttlebutt Analysis:** {qual_results.get('scuttlebutt', 'N/A')}")
-            st.markdown(f"**SEBI Check:** {qual_results.get('sebi_check', 'N/A')}")
+            # Simplified display logic, adjust as needed
+            for key, value in qual_results.items():
+                st.markdown(f"**{key.replace('_', ' ').title()}:** {value}")
 else:
     st.info("Enter a stock ticker in the sidebar and click 'Run Full Analysis' to begin.")

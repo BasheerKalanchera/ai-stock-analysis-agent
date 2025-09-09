@@ -47,13 +47,16 @@ def generate_investment_summary(ticker: str, quantitative_analysis: str, qualita
 
     The final report must be structured exactly as follows, using Markdown for formatting:
 
-    ## 1. Executive Summary
-    A brief, high-level overview (3-4 sentences) summarizing the key findings. State the overall investment thesis. Is it a buy, hold, or sell, and why?
+    ###  Investment Thesis
+    Give an overall investment thesis here. Is it a buy, hold, or sell, and why?
 
-    ## 2. Financial Performance (Quantitative Analysis)
+    ## 1. Executive Summary
+    A brief, high-level overview (3-4 sentences) summarizing the key findings. 
+
+    ## 2. Quantitative Analysis Summary
     Summarize the key takeaways from the quantitative analysis. Do not just repeat the data. Interpret it. Focus on trends in revenue, profitability, debt, and cash flow.
 
-    ## 3. Business & Management Commentary (Qualitative Analysis)
+    ## 3. Qualitative Analysis Summary
     Summarize the key insights from the qualitative analysis. Focus on management's tone, competitive advantages (moat), industry trends, and any red flags from the scuttlebutt or SEBI check.
 
     ## 4. SWOT Analysis
@@ -63,8 +66,8 @@ def generate_investment_summary(ticker: str, quantitative_analysis: str, qualita
     - **Opportunities:** External factors the company can capitalize on (e.g., new markets, favorable regulations).
     - **Threats:** External factors that could harm the company (e.g., new competition, economic downturn).
 
-    ## 5. Key Monitorables & Investment Thesis
-    Conclude with a bulleted list of 3-4 key metrics or factors that an investor should monitor in the upcoming quarters. Reiterate the core investment thesis.
+    ## 5. Key Monitorables 
+    Conclude with a bulleted list of 3-4 key metrics or factors that an investor should monitor in the upcoming quarters. 
 
     ---
     **Disclaimer:** This report is AI-generated and is for informational purposes only. It does not constitute financial advice. Please conduct your own due diligence before making any investment decisions.
