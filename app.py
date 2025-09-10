@@ -39,11 +39,15 @@ class StockAnalysisState(TypedDict):
     final_report: str | None
     log_file: str | None
     pdf_report_path: str | None
+    # MODIFICATION 1: Add is_consolidated to the state
+    is_consolidated: bool | None
 
 # --- Agent Nodes ---
 def fetch_data_node(state: StockAnalysisState):
     st.toast("Executing Agent 1: Data Fetcher...")
     ticker = state['ticker']
+    # MODIFICATION 4a: Get the flag from the state
+    is_consolidated = state['is_consolidated']
 
     # Use the log file path from the initial state if it exists, otherwise create one.
     if state.get('log_file'):
@@ -55,7 +59,14 @@ def fetch_data_node(state: StockAnalysisState):
         log_file_path = os.path.join(LOG_DIRECTORY, log_filename)
 
     download_path = os.path.abspath(DOWNLOAD_DIRECTORY)
-    paths = download_financial_data(ticker, os.getenv("SCREENER_EMAIL"), os.getenv("SCREENER_PASSWORD"), download_path)
+    # MODIFICATION 4b: Pass the flag to the download function
+    paths = download_financial_data(
+        ticker, 
+        os.getenv("SCREENER_EMAIL"), 
+        os.getenv("SCREENER_PASSWORD"), 
+        download_path, 
+        is_consolidated
+    )
     company_name = paths[0]
     file_paths = {
         "excel": os.path.abspath(paths[1]) if paths[1] and os.path.exists(paths[1]) else None,
@@ -169,6 +180,11 @@ if 'ticker' not in st.session_state:
 
 st.sidebar.header("Controls")
 ticker_input = st.sidebar.text_input("Enter Stock Ticker", value="RELIANCE")
+# MODIFICATION 2: Add the UI selector for data type
+data_type_choice = st.sidebar.radio(
+    "Data Type", 
+    ["Standalone", "Consolidated"]
+)
 
 if ticker_input.strip().upper() != st.session_state.ticker:
     st.session_state.ticker = ticker_input.strip().upper()
@@ -183,9 +199,14 @@ if st.sidebar.button("🚀 Run Full Analysis", type="primary"):
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         log_filename = f"{ticker}_{timestamp}.md"
         log_file_path = os.path.join(LOG_DIRECTORY, log_filename)
-
-        # 2. PASS the path into the graph's initial state.
-        inputs = {"ticker": st.session_state.ticker, "log_file": log_file_path}
+        # 2. PASS the path into the graph's initial state.  
+        # MODIFICATION 3: Capture the user's choice and add it to the initial state
+        is_consolidated = (data_type_choice == "Consolidated")
+        inputs = {
+            "ticker": st.session_state.ticker, 
+            "log_file": log_file_path,
+            "is_consolidated": is_consolidated
+        }
         
         with st.status("Running Analysis Crew...", expanded=True) as status:
             final_state_result = {} 

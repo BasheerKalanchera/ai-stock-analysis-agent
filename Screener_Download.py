@@ -8,6 +8,7 @@ from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
+from urllib.parse import urlparse
 
 def wait_for_new_file(download_path: str, files_before: list, timeout: int = 60) -> str | None:
     """Waits for a new file to appear in the download directory."""
@@ -20,7 +21,7 @@ def wait_for_new_file(download_path: str, files_before: list, timeout: int = 60)
         time.sleep(1)
     return None
 
-def download_financial_data(ticker: str, email: str, password: str, download_path: str):
+def download_financial_data(ticker: str, email: str, password: str, download_path: str, is_consolidated: bool = False):
     """
     Downloads Excel and the two most recent Concall Transcripts.
     Also scrapes and returns the company name.
@@ -57,13 +58,25 @@ def download_financial_data(ticker: str, email: str, password: str, download_pat
         time.sleep(3) # A short pause to ensure the login session is fully established.
         print("Login successful.")
 
-        print(f"Navigating to the main company page for {ticker}...")
-        #if ticker.isdigit():
-        company_url = f"https://www.screener.in/company/{ticker}/"
-        #else:
-        #    company_url = f"https://www.screener.in/company/{ticker}/consolidated/"
-        
-        driver.get(company_url)
+        # --- MODIFIED: Robustly handle consolidated vs. standalone URLs ---
+        if is_consolidated:
+            print(f"Attempting to navigate to the consolidated page for {ticker}...")
+            company_url = f"https://www.screener.in/company/{ticker}/consolidated/"
+            driver.get(company_url)
+            
+            # Check if the URL still contains the consolidated path after navigation.
+            # Screener.in often redirects to the standalone page if consolidated data isn't available.
+            if "/consolidated/" not in driver.current_url:
+                print("Consolidated page not found. Falling back to Standalone data.")
+                company_url = f"https://www.screener.in/company/{ticker}/"
+                driver.get(company_url)
+            else:
+                print("Successfully navigated to the consolidated page.")
+        else:
+            print(f"Navigating to the standalone page for {ticker}...")
+            company_url = f"https://www.screener.in/company/{ticker}/"
+            driver.get(company_url)
+        # --- END MODIFIED ---
 
         print("Waiting for company dashboard to load...")
         wait.until(EC.presence_of_element_located((By.ID, "top-ratios")))
@@ -149,4 +162,3 @@ def download_financial_data(ticker: str, email: str, password: str, download_pat
         print("\nBrowser closed.")
 
     return company_name, final_excel_path, final_pdf_path, final_latest_transcript_path, final_previous_transcript_path
-

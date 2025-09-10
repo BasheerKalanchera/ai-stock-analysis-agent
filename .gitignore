@@ -21,3 +21,5 @@ reports/
 # Ignore generated image files
 *.png
 
+# Ignore the entire VS Code folder
+.vscode/
