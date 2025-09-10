@@ -1,6 +1,6 @@
+# Screener_Download.py
 import os
 import time
-import argparse
 from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -8,7 +8,8 @@ from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
-from urllib.parse import urlparse
+# --- CHANGE 1: Import the exception we need to catch ---
+from selenium.common.exceptions import TimeoutException
 
 def wait_for_new_file(download_path: str, files_before: list, timeout: int = 60) -> str | None:
     """Waits for a new file to appear in the download directory."""
@@ -33,12 +34,12 @@ def download_financial_data(ticker: str, email: str, password: str, download_pat
         "download.prompt_for_download": False
     }
     chrome_options.add_experimental_option("prefs", prefs)
-    # **NOTE**: Headless mode is disabled for debugging. 
-    # To run in the background, remove the '#' from the line below.
-    chrome_options.add_argument("--headless") 
+    # Re-enable headless mode for deployment, comment out for local debugging
+    # chrome_options.add_argument("--headless") 
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--log-level=3")
     chrome_options.add_argument("--start-maximized")
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
     driver = None
 
     company_name = None
@@ -48,66 +49,61 @@ def download_financial_data(ticker: str, email: str, password: str, download_pat
         print("Initializing Chrome Driver...")
         service = ChromeService(executable_path=ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
-        wait = WebDriverWait(driver, 20)
+        wait = WebDriverWait(driver, 20) # Increased wait time slightly for more stability
 
         print("Logging into Screener.in...")
         driver.get("https://www.screener.in/login/")
         wait.until(EC.visibility_of_element_located((By.ID, "id_username"))).send_keys(email)
         wait.until(EC.visibility_of_element_located((By.ID, "id_password"))).send_keys(password)
         wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@type='submit']"))).click()
-        time.sleep(3) # A short pause to ensure the login session is fully established.
+        time.sleep(3)
         print("Login successful.")
 
-        # --- MODIFIED: Robustly handle consolidated vs. standalone URLs ---
         if is_consolidated:
-            print(f"Attempting to navigate to the consolidated page for {ticker}...")
-            company_url = f"https://www.screener.in/company/{ticker}/consolidated/"
-            driver.get(company_url)
-            
-            # Check if the URL still contains the consolidated path after navigation.
-            # Screener.in often redirects to the standalone page if consolidated data isn't available.
-            if "/consolidated/" not in driver.current_url:
-                print("Consolidated page not found. Falling back to Standalone data.")
-                company_url = f"https://www.screener.in/company/{ticker}/"
-                driver.get(company_url)
-            else:
-                print("Successfully navigated to the consolidated page.")
+            print(f"Navigating to the consolidated page for {ticker}...")
+            driver.get(f"https://www.screener.in/company/{ticker}/consolidated/")
         else:
             print(f"Navigating to the standalone page for {ticker}...")
-            company_url = f"https://www.screener.in/company/{ticker}/"
-            driver.get(company_url)
-        # --- END MODIFIED ---
+            driver.get(f"https://www.screener.in/company/{ticker}/")
 
-        print("Waiting for company dashboard to load...")
-        wait.until(EC.presence_of_element_located((By.ID, "top-ratios")))
-        print("Dashboard loaded.")
+        # --- CHANGE 2: NEW ROBUST FALLBACK LOGIC ---
+        # We will now TRY to download. If the button isn't found, we'll CATCH the error
+        # and fall back to the standalone page.
+        try:
+            print("Attempting to download from the current page...")
+            wait.until(EC.presence_of_element_located((By.ID, "top-ratios")))
+            company_name_element = wait.until(EC.visibility_of_element_located((By.XPATH, "//h1[contains(@class, 'margin-0')]")))
+            company_name = company_name_element.text.strip()
+            
+            files_before = os.listdir(download_path)
+            export_button_xpath = "//button[.//span[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'export to excel')]]"
+            
+            export_button = wait.until(EC.element_to_be_clickable((By.XPATH, export_button_xpath)))
+            driver.execute_script("arguments[0].click();", export_button)
+            print("SUCCESS: 'Export to Excel' button clicked.")
 
-        company_name_element = wait.until(EC.visibility_of_element_located((By.XPATH, "//h1[contains(@class, 'margin-0')]")))
-        company_name = company_name_element.text.strip()
-        print(f"SUCCESS: Scraped company name: {company_name}")
-        
-        files_before = os.listdir(download_path)
-        export_button_xpath = "//button[.//span[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'export to excel')]]"
-        
-        # NEW FAST CODE
-        print("Locating and clicking the 'Export to Excel' button...")
-        # 1. Wait for the button to simply be present in the page's HTML. This is much faster.
-        export_button = wait.until(EC.presence_of_element_located((By.XPATH, export_button_xpath)))
+        except TimeoutException:
+            print("WARNING: 'Export to Excel' button not found on the initial page.")
+            print(f"Falling back to the standalone page for {ticker} and retrying...")
+            
+            driver.get(f"https://www.screener.in/company/{ticker}/")
+            
+            # Retry the download logic
+            wait.until(EC.presence_of_element_located((By.ID, "top-ratios")))
+            company_name_element = wait.until(EC.visibility_of_element_located((By.XPATH, "//h1[contains(@class, 'margin-0')]")))
+            company_name = company_name_element.text.strip()
+            
+            files_before = os.listdir(download_path)
+            export_button_xpath = "//button[.//span[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'export to excel')]]"
 
-        # 2. Use a brief, targeted pause to ensure any button-enabling JS has run.
-        time.sleep(1) 
+            export_button = wait.until(EC.element_to_be_clickable((By.XPATH, export_button_xpath)))
+            driver.execute_script("arguments[0].click();", export_button)
+            print("SUCCESS: 'Export to Excel' button clicked on standalone page.")
+        # --- END OF CHANGE 2 ---
 
-        # 3. Use the robust JavaScript click, which works even if the button is slightly obscured.
-        driver.execute_script("arguments[0].click();", export_button)
-        
-        # --- FIX FOR INTERMITTENT CORRUPTED FILES ---
-        # Add a definitive pause AFTER clicking the download button. This gives the
-        # browser enough time to fully receive the file from the server before
-        # our script starts looking for it in the download folder, preventing a race condition.
         print("Waiting for 3 seconds for the download to complete...")
         time.sleep(3)
-        # --- END OF FIX ---
-
+        
         new_filename = wait_for_new_file(download_path, files_before)
         if new_filename:
             source_path = os.path.join(download_path, new_filename)
@@ -118,6 +114,7 @@ def download_financial_data(ticker: str, email: str, password: str, download_pat
         else:
             print("ERROR: Excel download timed out.")
 
+        # ... (rest of the transcript download logic remains the same) ...
         print("\nNavigating to the Documents page...")
         wait.until(EC.element_to_be_clickable((By.LINK_TEXT, "Documents"))).click()
         
@@ -125,10 +122,9 @@ def download_financial_data(ticker: str, email: str, password: str, download_pat
         transcript_elems = wait.until(EC.presence_of_all_elements_located((By.XPATH, transcripts_xpath)))
 
         if transcript_elems:
-            # Download latest transcript
             files_before = os.listdir(download_path)
             driver.execute_script("arguments[0].click();", transcript_elems[0])
-            print("Initiating Latest Concall Transcript download and Waiting for 2 seconds for the download to complete...")
+            print("Initiating Latest Concall Transcript download and Waiting for 2 seconds...")
             time.sleep(2)
             new_filename = wait_for_new_file(download_path, files_before)
             if new_filename:
@@ -138,13 +134,12 @@ def download_financial_data(ticker: str, email: str, password: str, download_pat
                 os.rename(os.path.join(download_path, new_filename), final_latest_transcript_path)
                 print(f"SUCCESS: Latest Concall Transcript saved to: {final_latest_transcript_path}")
 
-            # Download previous transcript
             if len(transcript_elems) > 1:
-                time.sleep(2) # Give browser a moment before next click
+                time.sleep(2)
                 files_before = os.listdir(download_path)
-                transcript_elems = driver.find_elements(By.XPATH, transcripts_xpath) # Re-find to avoid stale element
+                transcript_elems = driver.find_elements(By.XPATH, transcripts_xpath)
                 driver.execute_script("arguments[0].click();", transcript_elems[1])
-                print("Initiating Previous Concall Transcript download and Waiting for 2 seconds for the download to complete...")
+                print("Initiating Previous Concall Transcript download and Waiting for 2 seconds...")
                 time.sleep(2)
                 new_filename = wait_for_new_file(download_path, files_before)
                 if new_filename:
