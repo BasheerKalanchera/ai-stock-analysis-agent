@@ -57,7 +57,11 @@ def download_financial_data(ticker: str, email: str, password: str, download_pat
         wait.until(EC.visibility_of_element_located((By.ID, "id_username"))).send_keys(email)
         wait.until(EC.visibility_of_element_located((By.ID, "id_password"))).send_keys(password)
         wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@type='submit']"))).click()
-        wait.until(EC.visibility_of_element_located((By.ID, "search-input")))
+        # Correctly finds the search bar by its placeholder text instead of ID
+        # wait.until(EC.visibility_of_element_located((By.ID, "search-input")))
+        #wait.until(EC.visibility_of_element_located((By.XPATH, "//input[@placeholder='Search for a company']")))
+        # Correctly waits for the element to be present in the HTML
+        wait.until(EC.presence_of_element_located((By.XPATH, "//input[@placeholder='Search for a company']")))
         print("Login successful.")
 
         if is_consolidated:
