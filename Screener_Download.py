@@ -99,9 +99,15 @@ def download_financial_data(ticker: str, email: str, password: str, download_pat
         new_filename = wait_for_new_file(download_path, files_before)
         if new_filename:
             source_path = os.path.join(download_path, new_filename)
+            
+            # Add a 1-second pause to ensure the file is fully released
+            time.sleep(2) 
+
             final_excel_path = os.path.join(download_path, f"{ticker}.xlsx")
-            if os.path.exists(final_excel_path): os.remove(final_excel_path)
-            os.rename(source_path, final_excel_path)
+            #if os.path.exists(final_excel_path): os.remove(final_excel_path)
+            #os.rename(source_path, final_excel_path)
+            # This single line safely renames the file, overwriting the destination if it exists.
+            os.replace(source_path, final_excel_path)
             print(f"SUCCESS: Excel file saved to: {final_excel_path}")
         else:
             print("ERROR: Excel download timed out.")
