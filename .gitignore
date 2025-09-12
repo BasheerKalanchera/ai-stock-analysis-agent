@@ -17,3 +17,6 @@ __pycache__/
 # logs and reports
 logs/
 reports/
+
+# Ignore Streamlit secrets and other sensitive files
+.streamlit/secrets.toml
