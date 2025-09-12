@@ -1,9 +1,11 @@
 # qualitative_analysis_agent.py
 
 import os
+import io  # Added for BytesIO support
 import fitz  # PyMuPDF
 import google.generativeai as genai
 from dotenv import load_dotenv
+from typing import Optional, Dict  # Added for type hints
 
 # --- Load Environment Variables ---
 load_dotenv()
@@ -30,14 +32,29 @@ print(f"Qualitative Agent: Using Lite Model '{LITE_MODEL_NAME}' and Heavy Model 
 
 # --- Core Functions ---
 
-def _extract_text_from_pdf_path(pdf_path: str) -> str:
-    """Extracts all text from a PDF file given its path."""
+#def _extract_text_from_pdf_path(pdf_path: str) -> str:
+#    """Extracts all text from a PDF file given its path."""
+#    try:
+#        with fitz.open(pdf_path) as doc:
+#            full_text = "".join(page.get_text() for page in doc)
+#        return full_text
+#    except Exception as e:
+#        print(f"Error reading PDF file '{pdf_path}': {e}")
+#        return ""
+
+
+# NEW: Added function to handle in-memory PDF extraction
+def _extract_text_from_pdf_buffer(pdf_buffer: io.BytesIO | None) -> str:
+    """Extracts all text from a PDF file stored in memory."""
+    if not pdf_buffer:
+        return ""
     try:
-        with fitz.open(pdf_path) as doc:
+        # Use PyMuPDF to read PDF directly from memory buffer
+        with fitz.open(stream=pdf_buffer.getvalue(), filetype="pdf") as doc:
             full_text = "".join(page.get_text() for page in doc)
         return full_text
     except Exception as e:
-        print(f"Error reading PDF file '{pdf_path}': {e}")
+        print(f"Error reading PDF from buffer: {e}")
         return ""
 
 # MODIFIED: The function now accepts a 'model_name' parameter
@@ -148,10 +165,23 @@ def _check_sebi_violations(company_name: str) -> str:
     return _analyze_with_gemini(prompt, f"SEBI Violations Check for {company_name}", HEAVY_MODEL_NAME)
 
 
-def run_qualitative_analysis(company_name: str, latest_transcript_path: str | None, previous_transcript_path: str | None) -> dict:
+# MODIFIED: Updated main function to work with BytesIO instead of file paths
+def run_qualitative_analysis(
+    company_name: str, 
+    latest_transcript_buffer: io.BytesIO | None, 
+    previous_transcript_buffer: io.BytesIO | None
+) -> Dict[str, Optional[str]]:
     """
     The main function to run the entire qualitative analysis pipeline.
-    It orchestrates transcript analysis and web-based research.
+    Now accepts transcript data as BytesIO objects instead of file paths.
+
+    Args:
+        company_name: Name of the company to analyze
+        latest_transcript_buffer: Latest transcript PDF as BytesIO object
+        previous_transcript_buffer: Previous transcript PDF as BytesIO object
+
+    Returns:
+        Dictionary containing analysis results
     """
     results = {
         "positives_and_concerns": None,
@@ -161,26 +191,25 @@ def run_qualitative_analysis(company_name: str, latest_transcript_path: str | No
     }
 
     # --- Transcript-Based Analysis ---
-    if latest_transcript_path and os.path.exists(latest_transcript_path):
-        latest_text = _extract_text_from_pdf_path(latest_transcript_path)
+    if latest_transcript_buffer:
+        latest_text = _extract_text_from_pdf_buffer(latest_transcript_buffer)
         if latest_text:
             results["positives_and_concerns"] = _analyze_positives_and_concerns(latest_text)
             
-            if previous_transcript_path and os.path.exists(previous_transcript_path):
-                previous_text = _extract_text_from_pdf_path(previous_transcript_path)
+            if previous_transcript_buffer:
+                previous_text = _extract_text_from_pdf_buffer(previous_transcript_buffer)
                 if previous_text:
                     results["qoq_comparison"] = _compare_transcripts(latest_text, previous_text)
                 else:
                     results["qoq_comparison"] = "Could not extract text from the previous quarter's transcript."
             else:
-                 results["qoq_comparison"] = "Previous quarter transcript not available for comparison."
+                results["qoq_comparison"] = "Previous quarter transcript not available for comparison."
         else:
             results["positives_and_concerns"] = "Could not extract text from the latest transcript."
             results["qoq_comparison"] = "Analysis skipped as latest transcript could not be read."
     else:
         results["positives_and_concerns"] = "Latest transcript not available."
         results["qoq_comparison"] = "Latest transcript not available."
-
 
     # --- Web-Based Analysis ---
     if company_name:

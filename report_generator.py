@@ -41,15 +41,22 @@ def parse_markdown_table(md_table: str):
 def make_pdf_table(rows):
     if not rows:
         return None
-    table = Table(rows, hAlign="LEFT")
+    
+    # Calculate column widths based on content
+    col_widths = [max(len(str(row[i])) * 7 for row in rows) for i in range(len(rows[0]))]
+    
+    table = Table(rows, colWidths=col_widths, hAlign="LEFT")
     style = TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),  # Left align for better readability
         ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, -1), 9),
+        ('FONTSIZE', (0, 0), (-1, -1), 8),    # Smaller font for more content
         ('BOTTOMPADDING', (0, 0), (-1, 0), 6),
+        ('TOPPADDING', (0, 0), (-1, -1), 3),  # Add top padding
+        ('LEFTPADDING', (0, 0), (-1, -1), 4), # Add left padding
+        ('RIGHTPADDING', (0, 0), (-1, -1), 4) # Add right padding
     ])
     table.setStyle(style)
     return table

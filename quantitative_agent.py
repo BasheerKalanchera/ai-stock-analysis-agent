@@ -8,19 +8,32 @@ from dotenv import load_dotenv
 import matplotlib.pyplot as plt
 import datetime
 import io
+from typing import List, Dict, Any  # Add this import
 
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 load_dotenv()
 
 # --- CHARTING FUNCTIONS ---
 
+def format_year_ticks(ax):
+    """Helper function to format x-axis ticks to show only years"""
+    labels = [label.get_text()[:4] for label in ax.get_xticklabels()]
+    ax.set_xticklabels(labels, rotation=45, ha='right')
+
 def create_sales_profit_chart(df, ticker):
     try:
         data = df.loc[['Sales', 'Net profit']].copy()
-        for col in data.columns: data[col] = pd.to_numeric(data[col], errors='coerce')
-        data.T.plot(kind='bar', figsize=(12, 7), grid=True)
+        data.columns = pd.to_datetime(data.columns)
+        data = data.sort_index(axis=1)
+        
+        for col in data.columns: 
+            data[col] = pd.to_numeric(data[col], errors='coerce')
+        ax = data.T.plot(kind='bar', figsize=(12, 7), grid=True)
         plt.title(f'{ticker} - Annual Sales and Net Profit', fontsize=16)
-        plt.ylabel('Amount (in Crores)', fontsize=12); plt.xticks(rotation=45, ha='right'); plt.legend(title='Metric'); plt.tight_layout()
+        plt.ylabel('Amount (in Crores)', fontsize=12)
+        format_year_ticks(ax)
+        plt.legend(title='Metric')
+        plt.tight_layout()
 
         buf = io.BytesIO()
         plt.savefig(buf, format='png')
@@ -29,91 +42,135 @@ def create_sales_profit_chart(df, ticker):
         print(f"Sales vs Net Profit Chart for {ticker} created in memory.")
         return buf
     except Exception as e:
-        print(f"Could not generate Sales/Profit chart: {e}"); return None
+        print(f"Could not generate Sales/Profit chart: {e}")
+        return None
 
 def create_borrowings_chart(df, ticker):
     try:
         data = df.loc[['Borrowings']].copy()
-        for col in data.columns: data[col] = pd.to_numeric(data[col], errors='coerce')
-        data.T.plot(kind='bar', figsize=(10, 6), grid=True, legend=False)
+        data.columns = pd.to_datetime(data.columns)
+        data = data.sort_index(axis=1)
+        
+        for col in data.columns: 
+            data[col] = pd.to_numeric(data[col], errors='coerce')
+        ax = data.T.plot(kind='bar', figsize=(10, 6), grid=True, legend=False)
         plt.title(f'{ticker} - Borrowings Over Time', fontsize=16)
-        plt.ylabel('Amount (in Crores)', fontsize=12); plt.xticks(rotation=45, ha='right'); plt.tight_layout()
+        plt.ylabel('Amount (in Crores)', fontsize=12)
+        format_year_ticks(ax)
+        plt.tight_layout()
 
         buf = io.BytesIO()
-        plt.savefig(buf, format='png'); plt.close()
+        plt.savefig(buf, format='png')
+        plt.close()
         buf.seek(0)
         print(f"Borrowings Chart for {ticker} created in memory.")
         return buf
     except Exception as e:
-        print(f"Could not generate Borrowings chart: {e}"); return None
+        print(f"Could not generate Borrowings chart: {e}")
+        return None
 
 def create_cashflow_vs_profit_chart(cashflow_df, pnl_df, ticker):
     try:
         cf_data = cashflow_df.loc[['Cash from Operating Activity']].copy()
         profit_data = pnl_df.loc[['Net profit']].copy()
         combined_data = pd.concat([cf_data, profit_data])
-        for col in combined_data.columns: combined_data[col] = pd.to_numeric(combined_data[col], errors='coerce')
-        combined_data.T.plot(kind='bar', figsize=(12, 7), grid=True)
+        
+        combined_data.columns = pd.to_datetime(combined_data.columns)
+        combined_data = combined_data.sort_index(axis=1)
+        
+        for col in combined_data.columns:
+            combined_data[col] = pd.to_numeric(combined_data[col], errors='coerce')
+            
+        ax = combined_data.T.plot(kind='bar', figsize=(12, 7), grid=True)
         plt.title(f'{ticker} - Net Profit vs. Cash from Operating Activity', fontsize=16)
-        plt.ylabel('Amount (in Crores)', fontsize=12); plt.xticks(rotation=45, ha='right'); plt.legend(title='Metric'); plt.tight_layout()
+        plt.ylabel('Amount (in Crores)', fontsize=12)
+        format_year_ticks(ax)
+        plt.legend(title='Metric')
+        plt.tight_layout()
 
         buf = io.BytesIO()
-        plt.savefig(buf, format='png'); plt.close()
+        plt.savefig(buf, format='png')
+        plt.close()
         buf.seek(0)
         print(f"Cashflow vs Net Profit Chart for {ticker} created in memory.")
         return buf
     except Exception as e:
-        print(f"Could not generate Cashflow vs Profit chart: {e}"); return None
-
+        print(f"Could not generate Cashflow vs Profit chart: {e}")
+        return None
+    
 def create_opm_chart(opm_df: pd.DataFrame, ticker: str):
     """Generates a bar chart for OPM Trend from a pre-processed DataFrame."""
     try:
         opm_df_for_plotting = opm_df.drop('Operating Profit (Cr)').T
+        
+        opm_df_for_plotting.index = pd.to_datetime(opm_df_for_plotting.index)
+        opm_df_for_plotting = opm_df_for_plotting.sort_index()
+        
         opm_df_for_plotting['OPM %'] = pd.to_numeric(opm_df_for_plotting['OPM %'], errors='coerce')
-        opm_df_for_plotting.plot(y='OPM %', kind='bar', figsize=(10, 6), grid=True, legend=False, color='red')
+        ax = opm_df_for_plotting.plot(y='OPM %', kind='bar', figsize=(10, 6), grid=True, legend=False, color='red')
         plt.title(f'{ticker} - Operating Profit Margin (OPM) Trend', fontsize=16)
-        plt.ylabel('OPM (%)', fontsize=12); plt.xlabel('Year'); plt.xticks(rotation=45, ha='right'); plt.tight_layout()
+        plt.ylabel('OPM (%)', fontsize=12)
+        plt.xlabel('Year')
+        format_year_ticks(ax)
+        plt.tight_layout()
 
         buf = io.BytesIO()
-        plt.savefig(buf, format='png'); plt.close()
+        plt.savefig(buf, format='png')
+        plt.close()
         buf.seek(0)
         print(f"OPM Chart for {ticker} created in memory.")
         return buf
     except Exception as e:
-        print(f"Could not generate OPM chart from DataFrame: {e}"); return None
-
+        print(f"Could not generate OPM chart from DataFrame: {e}")
+        return None
 
 def create_reserves_chart(df, ticker):
     try:
         data = df.loc[['Reserves']].copy()
-        for col in data.columns: data[col] = pd.to_numeric(data[col], errors='coerce')
-        data.T.plot(kind='bar', figsize=(10, 6), grid=True, legend=False, color='green')
+        data.columns = pd.to_datetime(data.columns)
+        data = data.sort_index(axis=1)
+        
+        for col in data.columns: 
+            data[col] = pd.to_numeric(data[col], errors='coerce')
+        ax = data.T.plot(kind='bar', figsize=(10, 6), grid=True, legend=False, color='green')
         plt.title(f'{ticker} - Reserves Growth Over Time', fontsize=16)
-        plt.ylabel('Amount (in Crores)', fontsize=12); plt.xticks(rotation=45, ha='right'); plt.tight_layout()
+        plt.ylabel('Amount (in Crores)', fontsize=12)
+        format_year_ticks(ax)
+        plt.tight_layout()
 
         buf = io.BytesIO()
-        plt.savefig(buf, format='png'); plt.close()
+        plt.savefig(buf, format='png')
+        plt.close()
         buf.seek(0)
         print(f"Reserves Chart for {ticker} created in memory.")
         return buf
     except Exception as e:
-        print(f"Could not generate Reserves chart: {e}"); return None
+        print(f"Could not generate Reserves chart: {e}")
+        return None
 
 def create_cfo_chart(df, ticker):
     try:
         data = df.loc[['Cash from Operating Activity']].copy()
-        for col in data.columns: data[col] = pd.to_numeric(data[col], errors='coerce')
-        data.T.plot(kind='bar', figsize=(10, 6), grid=True, legend=False, color='purple')
+        data.columns = pd.to_datetime(data.columns)
+        data = data.sort_index(axis=1)
+        
+        for col in data.columns: 
+            data[col] = pd.to_numeric(data[col], errors='coerce')
+        ax = data.T.plot(kind='bar', figsize=(10, 6), grid=True, legend=False, color='purple')
         plt.title(f'{ticker} - Cash from Operating Activity (CFO) Trend', fontsize=16)
-        plt.ylabel('Amount (in Crores)', fontsize=12); plt.xticks(rotation=45, ha='right'); plt.tight_layout()
+        plt.ylabel('Amount (in Crores)', fontsize=12)
+        format_year_ticks(ax)
+        plt.tight_layout()
         
         buf = io.BytesIO()
-        plt.savefig(buf, format='png'); plt.close()
+        plt.savefig(buf, format='png')
+        plt.close()
         buf.seek(0)
         print(f"CFO Chart for {ticker} created in memory.")
         return buf
     except Exception as e:
-        print(f"Could not generate CFO chart: {e}"); return None
+        print(f"Could not generate CFO chart: {e}")
+        return None
 
 # --- HEADER CLEANING HELPER ---
 def clean_headers(df: pd.DataFrame) -> pd.DataFrame:
@@ -132,9 +189,12 @@ def clean_headers(df: pd.DataFrame) -> pd.DataFrame:
 # --- END HEADER CLEANING ---
 
 # --- DATA PARSING ---
-def read_and_parse_data_sheet(excel_path: str):
+def read_and_parse_data_sheet(excel_buffer: io.BytesIO):
+    """Parse financial data from Excel buffer."""
     try:
-        df = pd.read_excel(excel_path, sheet_name='Data Sheet', header=None, engine='openpyxl')
+        df = pd.read_excel(excel_buffer, sheet_name='Data Sheet', header=None, engine='openpyxl')
+        # Reset buffer position for subsequent reads
+        excel_buffer.seek(0)
         report_date_indices = df[df.iloc[:, 0].astype(str).str.contains('Report Date', na=False)].index
         annual_headers_row_index = report_date_indices[0]
         annual_headers = [h.strftime('%Y-%m-%d') if isinstance(h, datetime.datetime) else str(h) for h in df.iloc[annual_headers_row_index, :].tolist()]
@@ -167,13 +227,12 @@ def read_and_parse_data_sheet(excel_path: str):
     except Exception as e:
         print(f"Error parsing 'Data Sheet': {e}"); return None, None, None
 
-def calculate_opm_from_data_sheet(excel_path: str):
-    """
-    Calculates Operating Profit and OPM % directly from the 'Data Sheet'.
-    This logic is ported from the corrected excel_debugger.py.
-    """
+def calculate_opm_from_data_sheet(excel_buffer: io.BytesIO):
+    """Calculate OPM from Excel buffer."""
     try:
-        df = pd.read_excel(excel_path, sheet_name='Data Sheet', header=None, engine='openpyxl')
+        df = pd.read_excel(excel_buffer, sheet_name='Data Sheet', header=None, engine='openpyxl')
+        # Reset buffer position for subsequent reads
+        excel_buffer.seek(0)
         
         header_row_index = df[df[0] == 'Report Date'].index[0]
         header_values = df.iloc[header_row_index]
@@ -302,21 +361,33 @@ def safe_extract_section(text, start_marker, end_marker=None):
         print(f"Regex error for marker '{start_marker}': {e}"); return ""
 
 # --- MAIN ANALYSIS FUNCTION ---
-def analyze_financials(excel_path: str, ticker: str):
+def analyze_financials(excel_buffer: io.BytesIO, ticker: str) -> List[Dict[str, Any]]:
+    """
+    Analyzes financial data from Excel file stored in memory.
+    Now accepts Excel data as BytesIO object instead of file path.
+    """
     print("--- Starting Quantitative Analysis ---")
     try:
-        annual_pnl_df, balance_sheet_df, cash_flow_df = read_and_parse_data_sheet(excel_path)
-        if annual_pnl_df is None: return [{"type": "text", "content": "Could not parse financial statements."}]
+        # Parse Excel data from buffer
+        annual_pnl_df, balance_sheet_df, cash_flow_df = read_and_parse_data_sheet(excel_buffer)
+        if annual_pnl_df is None: 
+            return [{"type": "text", "content": "Could not parse financial statements."}]
 
-        opm_df = calculate_opm_from_data_sheet(excel_path)
+        # Calculate OPM using the same buffer
+        opm_df = calculate_opm_from_data_sheet(excel_buffer)
         if opm_df is not None:
             opm_table_string = opm_df.to_markdown()
         else:
             opm_table_string = "OPM data could not be extracted from the 'Data Sheet'."
             
-        analysis_result_text = get_analysis_from_gemini(annual_pnl_df, balance_sheet_df, cash_flow_df, ticker, opm_table_string)
-        if "ERROR:" in analysis_result_text: return [{"type": "text", "content": analysis_result_text}]
+        # Get analysis from Gemini
+        analysis_result_text = get_analysis_from_gemini(
+            annual_pnl_df, balance_sheet_df, cash_flow_df, ticker, opm_table_string
+        )
+        if "ERROR:" in analysis_result_text: 
+            return [{"type": "text", "content": analysis_result_text}]
 
+        # Create charts using the parsed DataFrames
         chart1_sales_profit = create_sales_profit_chart(annual_pnl_df, ticker)
         chart2_borrowings = create_borrowings_chart(balance_sheet_df, ticker)
         chart3_cf_vs_profit = create_cashflow_vs_profit_chart(cash_flow_df, annual_pnl_df, ticker)
@@ -425,12 +496,23 @@ def analyze_financials(excel_path: str, ticker: str):
     except Exception as e:
         return [{"type": "text", "content": f"An unexpected error in quantitative_agent: {e.__class__.__name__} {e}"}]
 
-if __name__ == '__main__':
-    TICKER = "JASH"; file_path = f"downloads/{TICKER}.xlsx"
-    if not os.path.exists(file_path):
-        print(f"Error: Excel file not found at {file_path}")
-    else:
-        final_content = analyze_financials(file_path, TICKER)
-        import json
-        print("\n--- STRUCTURED OUTPUT ---")
-        print(json.dumps(final_content, indent=2))
+#if __name__ == '__main__':
+#   Test with sample data
+# TICKER = "JASH"
+# try:
+#     # Create a test buffer directly instead of reading from file
+#     test_buffer = io.BytesIO()
+#     # You could either:
+#     # 1. Read from a test file in a test directory
+#     # 2. Create a small test DataFrame and save it to the buffer
+#     # For now, keeping file read for testing
+#     with open(f"downloads/{TICKER}.xlsx", 'rb') as f:
+#         test_buffer.write(f.read())
+#     test_buffer.seek(0)  # Reset buffer position
+    
+#     final_content = analyze_financials(test_buffer, TICKER)
+#     import json
+#     print("\n--- STRUCTURED OUTPUT ---")
+#     print(json.dumps(final_content, indent=2))
+# except Exception as e:
+#     print(f"Error during testing: {e}")

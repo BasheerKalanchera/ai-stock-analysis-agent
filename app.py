@@ -16,7 +16,7 @@ from synthesis_agent import generate_investment_summary
 from report_generator import create_pdf_report
 
 # --- Page Configuration ---
-st.set_page_config(page_title="AI Stock Analysis Crew (LangGraph)", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="AI Stock Analysis Crew", page_icon="🤖", layout="wide")
 
 # --- UNIFIED SECRETS & ENV VARIABLE HANDLING ---
 # This pattern works for both local development (using .env) and Streamlit Cloud
@@ -26,24 +26,28 @@ SCREENER_PASSWORD = st.secrets.get("SCREENER_PASSWORD", os.getenv("SCREENER_PASS
 
 # --- Directory Setup for Local Development ---
 # On Streamlit Cloud, the filesystem is ephemeral. These directories will be temporary.
-LOG_DIRECTORY = "logs"
-REPORTS_DIRECTORY = "reports"
-DOWNLOAD_DIRECTORY = "downloads"
-for directory in [LOG_DIRECTORY, REPORTS_DIRECTORY, DOWNLOAD_DIRECTORY]:
-    if not os.path.exists(directory):
-        os.makedirs(directory)
+#LOG_DIRECTORY = "logs"
+#REPORTS_DIRECTORY = "reports"
+#DOWNLOAD_DIRECTORY = "downloads"
+#for directory in [LOG_DIRECTORY, REPORTS_DIRECTORY, DOWNLOAD_DIRECTORY]:
+#    if not os.path.exists(directory):
+#        os.makedirs(directory)
 
 # --- Define Graph State ---
 class StockAnalysisState(TypedDict):
+    """
+    State container for the stock analysis workflow.
+    All file data is stored in memory using BytesIO objects.
+    """
     ticker: str
     company_name: str | None
-    file_paths: Dict[str, str]
+    file_data: Dict[str, io.BytesIO]  # Holds Excel and PDF data in memory
     quant_results_structured: List[Dict[str, Any]] | None
     quant_text_for_synthesis: str | None
     qualitative_results: Dict[str, Any] | None
     final_report: str | None
-    log_file_content: Annotated[str, lambda x, y: x + y] # Use Annotated to combine log updates
-    pdf_report_bytes: bytes | None # Store PDF in memory
+    log_file_content: Annotated[str, lambda x, y: x + y]
+    pdf_report_bytes: bytes | None
     is_consolidated: bool | None
 
 # --- Agent Nodes ---
@@ -52,47 +56,43 @@ def fetch_data_node(state: StockAnalysisState):
     ticker = state['ticker']
     is_consolidated = state['is_consolidated']
     
-    # Initialize log content from the state if it exists
     log_content_accumulator = state.get('log_file_content', "")
 
-    download_path = os.path.abspath(DOWNLOAD_DIRECTORY)
-    
-    paths = download_financial_data(
+    # Get file data in memory instead of paths
+    company_name, file_data = download_financial_data(
         ticker,
         SCREENER_EMAIL,
         SCREENER_PASSWORD,
-        download_path,
         is_consolidated
     )
-    company_name = paths[0]
-    file_paths = {
-        "excel": os.path.abspath(paths[1]) if paths[1] and os.path.exists(paths[1]) else None,
-        "latest_transcript": os.path.abspath(paths[3]) if paths[3] and os.path.exists(paths[3]) else None,
-        "previous_transcript": os.path.abspath(paths[4]) if paths[4] and os.path.exists(paths[4]) else None
-    }
     
     timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_header = f"AGENT 1: DOWNLOAD SUMMARY for {company_name or ticker}"
     log_entry = (f"## {log_header}\n\n"
                  f"**Timestamp**: {timestamp_str}\n\n"
-                 f"**Excel Path**: `{file_paths['excel'] or 'Download Failed'}`\n\n"
-                 f"**Latest Transcript**: `{file_paths['latest_transcript'] or 'Download Failed'}`\n\n"
-                 f"**Previous Transcript**: `{file_paths['previous_transcript'] or 'Download Failed'}`\n\n---\n\n")
+                 f"**Excel Data**: {'Downloaded' if file_data.get('excel') else 'Failed'}\n\n"
+                 f"**Latest Transcript**: {'Downloaded' if file_data.get('latest_transcript') else 'Failed'}\n\n"
+                 f"**Previous Transcript**: {'Downloaded' if file_data.get('previous_transcript') else 'Failed'}\n\n---\n\n")
     
     log_content_accumulator += log_entry
         
-    return {"company_name": company_name, "file_paths": file_paths, "log_file_content": log_content_accumulator}
+    return {
+        "company_name": company_name, 
+        "file_data": file_data,
+        "log_file_content": log_content_accumulator
+    }
 
 def quantitative_analysis_node(state: StockAnalysisState):
     st.toast("Executing Agent 2: Quantitative Analyst...")
-    excel_file = state['file_paths'].get('excel')
+    excel_data = state['file_data'].get('excel')
     log_content_accumulator = state['log_file_content']
     
-    if not excel_file or not os.path.exists(excel_file):
-        text_results = "Quantitative analysis skipped: Excel file not found or download failed."
+    if not excel_data:
+        text_results = "Quantitative analysis skipped: Excel data not found."
         structured_results = [{"type": "text", "content": text_results}]
     else:
-        structured_results = analyze_financials(excel_file, state['ticker'])
+        # Pass BytesIO object instead of file path
+        structured_results = analyze_financials(excel_data, state['ticker'])
         text_results = "\n".join([item['content'] for item in structured_results if item['type'] == 'text'])
 
     log_content_accumulator += f"## AGENT 2: QUANTITATIVE ANALYSIS\n\n{text_results}\n\n---\n\n"
@@ -108,7 +108,12 @@ def qualitative_analysis_node(state: StockAnalysisState):
     company = state['company_name'] or state['ticker']
     log_content_accumulator = state['log_file_content']
     
-    results = run_qualitative_analysis(company, state['file_paths'].get("latest_transcript"), state['file_paths'].get("previous_transcript"))
+    # Pass BytesIO objects instead of file paths
+    results = run_qualitative_analysis(
+        company, 
+        state['file_data'].get("latest_transcript"),
+        state['file_data'].get("previous_transcript")
+    )
     
     log_entry = "## AGENT 3: QUALITATIVE ANALYSIS\n\n"
     for key, value in results.items():
@@ -165,7 +170,7 @@ workflow.add_edge("generate_report", END)
 app_graph = workflow.compile()
 
 # --- Streamlit UI ---
-st.title("🤖 AI Stock Analysis Crew (LangGraph Edition)")
+st.title("🤖 AI Stock Analysis Crew")
 st.header("Automated Investment Analysis Workflow", divider="rainbow")
 
 if 'final_state' not in st.session_state:
@@ -200,19 +205,21 @@ if st.sidebar.button("🚀 Run Full Analysis", type="primary"):
             try:
                 for event in app_graph.stream(inputs):
                     for node_name, node_output in event.items():
-                        if node_name == "fetch_data":
-                            status.update(label="Executing Agent 2 & 3: Quantitative & Qualitative Analysis...")
-                        elif node_name == "synthesis":
-                            status.update(label="Executing Agent 4: Generating Final Summary...")
-                        elif node_name == "generate_report":
-                             status.update(label="Executing Agent 5: Creating PDF Report...")
+                        # Update status message based on current node
+                        status_messages = {
+                            "fetch_data": "Downloading financial data...",
+                            "quantitative_analysis": "Running quantitative analysis...",
+                            "qualitative_analysis": "Analyzing qualitative data...",
+                            "synthesis": "Generating final summary...",
+                            "generate_report": "Creating PDF report..."
+                        }
+                        if node_name in status_messages:
+                            status.update(label=status_messages[node_name])
                         
                         if node_output:
                             final_state_result.update(node_output)
                 
-                # Manually add the ticker to the final result dictionary
                 final_state_result['ticker'] = st.session_state.ticker
-
                 st.session_state.final_state = final_state_result
                 status.update(label="Analysis Complete!", state="complete", expanded=False)
                 st.rerun()
@@ -226,28 +233,7 @@ if st.session_state.final_state:
     final_state = st.session_state.final_state
     st.header(f"Analysis Results for {final_state.get('company_name') or final_state.get('ticker')}", divider="rainbow")
 
-    # --- ADDED: SAVE FILES LOCALLY FOR DEBUGGING ---
-    # This block saves a copy of the in-memory log and PDF for your local records.
-    ticker = final_state.get('ticker', 'STOCK')
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
-    # Save the log file
-    if final_state.get('log_file_content'):
-        log_filename = f"log_{ticker}_{timestamp}.md"
-        log_filepath = os.path.join(LOG_DIRECTORY, log_filename)
-        with open(log_filepath, "w", encoding="utf-8") as f:
-            f.write(final_state['log_file_content'])
-        st.sidebar.info(f"Log file saved to: `{log_filepath}`")
-
-    # Save the PDF report
-    if final_state.get('pdf_report_bytes'):
-        pdf_filename = f"Report_{ticker}_{timestamp}.pdf"
-        pdf_filepath = os.path.join(REPORTS_DIRECTORY, pdf_filename)
-        with open(pdf_filepath, "wb") as f:
-            f.write(final_state['pdf_report_bytes'])
-        st.sidebar.info(f"PDF report saved to: `{pdf_filepath}`")
-    # --- END OF ADDED BLOCK ---
-
+    
     st.sidebar.markdown("---")
     st.sidebar.subheader("Download Report")
     

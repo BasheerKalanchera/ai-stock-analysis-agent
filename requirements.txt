@@ -21,3 +21,6 @@ openpyxl
 # PDF generation and text extraction
 reportlab
 PyMuPDF
+
+matplotlib
+tabulate
