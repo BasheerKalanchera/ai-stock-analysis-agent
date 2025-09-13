@@ -1,0 +1,268 @@
+﻿import streamlit as st
+import os
+import datetime
+from dotenv import load_dotenv
+from typing import TypedDict, Dict, Any, List, Annotated
+import io
+
+# --- LangGraph Imports ---
+from langgraph.graph import StateGraph, END
+
+# --- Import Agent Functions ---
+from Screener_Download import download_financial_data
+from qualitative_analysis_agent import run_qualitative_analysis
+from quantitative_agent import analyze_financials
+from synthesis_agent import generate_investment_summary
+from report_generator import create_pdf_report
+
+# --- Page Configuration ---
+st.set_page_config(page_title="AI Stock Analysis Crew", page_icon="🤖", layout="wide")
+
+# --- UNIFIED SECRETS & ENV VARIABLE HANDLING ---
+# This pattern works for both local development (using .env) and Streamlit Cloud
+load_dotenv()
+SCREENER_EMAIL = st.secrets.get("SCREENER_EMAIL", os.getenv("SCREENER_EMAIL"))
+SCREENER_PASSWORD = st.secrets.get("SCREENER_PASSWORD", os.getenv("SCREENER_PASSWORD"))
+
+# --- Directory Setup for Local Development ---
+# On Streamlit Cloud, the filesystem is ephemeral. These directories will be temporary.
+#LOG_DIRECTORY = "logs"
+#REPORTS_DIRECTORY = "reports"
+#DOWNLOAD_DIRECTORY = "downloads"
+#for directory in [LOG_DIRECTORY, REPORTS_DIRECTORY, DOWNLOAD_DIRECTORY]:
+#    if not os.path.exists(directory):
+#        os.makedirs(directory)
+
+# --- Define Graph State ---
+class StockAnalysisState(TypedDict):
+    """
+    State container for the stock analysis workflow.
+    All file data is stored in memory using BytesIO objects.
+    """
+    ticker: str
+    company_name: str | None
+    file_data: Dict[str, io.BytesIO]  # Holds Excel and PDF data in memory
+    quant_results_structured: List[Dict[str, Any]] | None
+    quant_text_for_synthesis: str | None
+    qualitative_results: Dict[str, Any] | None
+    final_report: str | None
+    log_file_content: Annotated[str, lambda x, y: x + y]
+    pdf_report_bytes: bytes | None
+    is_consolidated: bool | None
+
+# --- Agent Nodes ---
+def fetch_data_node(state: StockAnalysisState):
+    st.toast("Executing Agent 1: Data Fetcher...")
+    ticker = state['ticker']
+    is_consolidated = state['is_consolidated']
+    
+    log_content_accumulator = state.get('log_file_content', "")
+
+    # Get file data in memory instead of paths
+    company_name, file_data = download_financial_data(
+        ticker,
+        SCREENER_EMAIL,
+        SCREENER_PASSWORD,
+        is_consolidated
+    )
+    
+    timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    log_header = f"AGENT 1: DOWNLOAD SUMMARY for {company_name or ticker}"
+    log_entry = (f"## {log_header}\n\n"
+                 f"**Timestamp**: {timestamp_str}\n\n"
+                 f"**Excel Data**: {'Downloaded' if file_data.get('excel') else 'Failed'}\n\n"
+                 f"**Latest Transcript**: {'Downloaded' if file_data.get('latest_transcript') else 'Failed'}\n\n"
+                 f"**Previous Transcript**: {'Downloaded' if file_data.get('previous_transcript') else 'Failed'}\n\n---\n\n")
+    
+    log_content_accumulator += log_entry
+        
+    return {
+        "company_name": company_name, 
+        "file_data": file_data,
+        "log_file_content": log_content_accumulator
+    }
+
+def quantitative_analysis_node(state: StockAnalysisState):
+    st.toast("Executing Agent 2: Quantitative Analyst...")
+    excel_data = state['file_data'].get('excel')
+    log_content_accumulator = state['log_file_content']
+    
+    if not excel_data:
+        text_results = "Quantitative analysis skipped: Excel data not found."
+        structured_results = [{"type": "text", "content": text_results}]
+    else:
+        # Pass BytesIO object instead of file path
+        structured_results = analyze_financials(excel_data, state['ticker'])
+        text_results = "\n".join([item['content'] for item in structured_results if item['type'] == 'text'])
+
+    log_content_accumulator += f"## AGENT 2: QUANTITATIVE ANALYSIS\n\n{text_results}\n\n---\n\n"
+        
+    return {
+        "quant_results_structured": structured_results,
+        "quant_text_for_synthesis": text_results,
+        "log_file_content": log_content_accumulator
+    }
+
+def qualitative_analysis_node(state: StockAnalysisState):
+    st.toast("Executing Agent 3: Qualitative Analyst...")
+    company = state['company_name'] or state['ticker']
+    log_content_accumulator = state['log_file_content']
+    
+    # Pass BytesIO objects instead of file paths
+    results = run_qualitative_analysis(
+        company, 
+        state['file_data'].get("latest_transcript"),
+        state['file_data'].get("previous_transcript")
+    )
+    
+    log_entry = "## AGENT 3: QUALITATIVE ANALYSIS\n\n"
+    for key, value in results.items():
+        log_entry += f"### {key.replace('_', ' ').title()}\n{value}\n\n"
+    log_entry += "---\n\n"
+    
+    log_content_accumulator += log_entry
+    return {"qualitative_results": results, "log_file_content": log_content_accumulator}
+
+def synthesis_node(state: StockAnalysisState):
+    st.toast("Executing Agent 4: Synthesis Agent...")
+    log_content_accumulator = state['log_file_content']
+    report = generate_investment_summary(
+        state['company_name'] or state['ticker'],
+        state['quant_text_for_synthesis'],
+        state['qualitative_results']
+    )
+    
+    log_content_accumulator += f"## AGENT 4: FINAL SYNTHESIS REPORT\n\n{report}\n\n---\n\n"
+    return {"final_report": report, "log_file_content": log_content_accumulator}
+
+def generate_report_node(state: StockAnalysisState):
+    st.toast("Executing Agent 5: Report Generator...")
+    
+    pdf_buffer = io.BytesIO()
+    
+    create_pdf_report(
+        ticker=state['ticker'],
+        company_name=state['company_name'],
+        quant_results=state['quant_results_structured'],
+        qual_results=state['qualitative_results'],
+        final_report=state['final_report'],
+        file_path=pdf_buffer
+    )
+    pdf_buffer.seek(0)
+    return {"pdf_report_bytes": pdf_buffer.getvalue()}
+
+# --- Build the Graph ---
+workflow = StateGraph(StockAnalysisState)
+workflow.add_node("fetch_data", fetch_data_node)
+workflow.add_node("quantitative_analysis", quantitative_analysis_node)
+workflow.add_node("qualitative_analysis", qualitative_analysis_node)
+workflow.add_node("synthesis", synthesis_node)
+workflow.add_node("generate_report", generate_report_node)
+
+workflow.set_entry_point("fetch_data")
+
+workflow.add_edge("fetch_data", "quantitative_analysis")
+workflow.add_edge("fetch_data", "qualitative_analysis")
+workflow.add_edge(["quantitative_analysis", "qualitative_analysis"], "synthesis")
+workflow.add_edge("synthesis", "generate_report")
+workflow.add_edge("generate_report", END)
+
+app_graph = workflow.compile()
+
+# --- Streamlit UI ---
+st.title("🤖 AI Stock Analysis Crew")
+st.header("Automated Investment Analysis Workflow", divider="rainbow")
+
+if 'final_state' not in st.session_state:
+    st.session_state.final_state = None
+if 'ticker' not in st.session_state:
+    st.session_state.ticker = ""
+
+st.sidebar.header("Controls")
+ticker_input = st.sidebar.text_input("Enter Stock Ticker", value="RELIANCE")
+data_type_choice = st.sidebar.radio(
+    "Data Type",
+    ["Standalone", "Consolidated"]
+)
+
+if ticker_input.strip().upper() != st.session_state.ticker:
+    st.session_state.ticker = ticker_input.strip().upper()
+    st.session_state.final_state = None
+
+if st.sidebar.button("🚀 Run Full Analysis", type="primary"):
+    if st.session_state.ticker:
+        st.session_state.final_state = None
+        
+        is_consolidated = (data_type_choice == "Consolidated")
+        inputs = {
+            "ticker": st.session_state.ticker,
+            "log_file_content": f"# Analysis Log for {st.session_state.ticker}\n\n",
+            "is_consolidated": is_consolidated
+        }
+        
+        with st.status("Running Analysis Crew...", expanded=True) as status:
+            final_state_result = {}
+            try:
+                for event in app_graph.stream(inputs):
+                    for node_name, node_output in event.items():
+                        # Update status message based on current node
+                        status_messages = {
+                            "fetch_data": "Downloading financial data...",
+                            "quantitative_analysis": "Running quantitative analysis...",
+                            "qualitative_analysis": "Analyzing qualitative data...",
+                            "synthesis": "Generating final summary...",
+                            "generate_report": "Creating PDF report..."
+                        }
+                        if node_name in status_messages:
+                            status.update(label=status_messages[node_name])
+                        
+                        if node_output:
+                            final_state_result.update(node_output)
+                
+                final_state_result['ticker'] = st.session_state.ticker
+                st.session_state.final_state = final_state_result
+                status.update(label="Analysis Complete!", state="complete", expanded=False)
+                st.rerun()
+            except Exception as e:
+                status.update(label=f"An error occurred: {e}", state="error")
+                st.error(f"Workflow failed: {e}")
+    else:
+        st.sidebar.warning("Please enter a stock ticker.")
+
+if st.session_state.final_state:
+    final_state = st.session_state.final_state
+    st.header(f"Analysis Results for {final_state.get('company_name') or final_state.get('ticker')}", divider="rainbow")
+
+    
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Download Report")
+    
+    if final_state.get('pdf_report_bytes'):
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        report_filename = f"Report_{final_state.get('ticker', 'STOCK')}_{timestamp}.pdf"
+        st.sidebar.download_button(
+            label="Download PDF Report",
+            data=final_state['pdf_report_bytes'],
+            file_name=report_filename,
+            mime="application/pdf"
+        )
+    else:
+        st.sidebar.error("PDF Report not generated.")
+
+    if final_state.get('final_report'):
+        st.subheader("📈📝 Comprehensive Investment Summary")
+        st.markdown(final_state['final_report'], unsafe_allow_html=True)
+
+    with st.expander("📂 View Individual Agent Outputs & Logs", expanded=False):
+        if final_state.get('log_file_content'):
+             st.code(final_state['log_file_content'], language='markdown')
+        if final_state.get('quant_text_for_synthesis'):
+            st.subheader("📈 Quantitative Insights")
+            st.markdown(final_state['quant_text_for_synthesis'])
+        if final_state.get('qualitative_results'):
+            st.subheader("📝 Qualitative Insights")
+            qual_results = final_state['qualitative_results']
+            for key, value in qual_results.items():
+                st.markdown(f"**{key.replace('_', ' ').title()}:** {value}")
+else:
+    st.info("Enter a stock ticker in the sidebar and click 'Run Full Analysis' to begin.")
