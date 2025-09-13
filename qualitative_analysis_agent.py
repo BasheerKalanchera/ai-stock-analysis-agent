@@ -1,11 +1,13 @@
-# qualitative_analysis_agent.py
-
 import os
-import io  # Added for BytesIO support
-import fitz  # PyMuPDF
+import io
+import fitz
+import asyncio
+import aiohttp
 import google.generativeai as genai
 from dotenv import load_dotenv
-from typing import Optional, Dict  # Added for type hints
+from typing import Optional, Dict
+from functools import lru_cache
+from concurrent.futures import ThreadPoolExecutor
 
 # --- Load Environment Variables ---
 load_dotenv()
@@ -15,174 +17,131 @@ API_KEY_CONFIGURED = False
 try:
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
-        raise ValueError("GOOGLE_API_KEY not found in .env file.")
+        raise ValueError("Google API Key not found in environment variables.")
     genai.configure(api_key=api_key)
     print("Qualitative Agent: Google API Key configured successfully.")
     API_KEY_CONFIGURED = True
 except (ValueError, Exception) as e:
     print(f"Qualitative Agent Error: Could not configure Google API Key. {e}")
 
-# NEW: Load model names from .env or use defaults
-# For simpler tasks like transcript summaries
+# Load model names from .env or use defaults
 LITE_MODEL_NAME = os.getenv("LITE_MODEL_NAME", "gemini-1.5-flash")
-# For complex, web-research tasks
 HEAVY_MODEL_NAME = os.getenv("HEAVY_MODEL_NAME", "gemini-1.5-pro")
-print(f"Qualitative Agent: Using Lite Model '{LITE_MODEL_NAME}' and Heavy Model '{HEAVY_MODEL_NAME}'.")
-
 
 # --- Core Functions ---
-
-#def _extract_text_from_pdf_path(pdf_path: str) -> str:
-#    """Extracts all text from a PDF file given its path."""
-#    try:
-#        with fitz.open(pdf_path) as doc:
-#            full_text = "".join(page.get_text() for page in doc)
-#        return full_text
-#    except Exception as e:
-#        print(f"Error reading PDF file '{pdf_path}': {e}")
-#        return ""
-
-
-# NEW: Added function to handle in-memory PDF extraction
 def _extract_text_from_pdf_buffer(pdf_buffer: io.BytesIO | None) -> str:
-    """Extracts all text from a PDF file stored in memory."""
+    """Optimized PDF text extraction"""
     if not pdf_buffer:
         return ""
     try:
-        # Use PyMuPDF to read PDF directly from memory buffer
+        print("📄 Extracting text from transcript...")
         with fitz.open(stream=pdf_buffer.getvalue(), filetype="pdf") as doc:
-            full_text = "".join(page.get_text() for page in doc)
-        return full_text
+            text_blocks = []
+            for page in doc:
+                text_blocks.append(page.get_text())
+            text = "\n".join(text_blocks)
+        print("✅ Text extraction complete")
+        return text
     except Exception as e:
         print(f"Error reading PDF from buffer: {e}")
         return ""
 
-# MODIFIED: The function now accepts a 'model_name' parameter
-def _analyze_with_gemini(prompt: str, analysis_type: str, model_name: str) -> str:
-    """Generic function to call the Gemini model with a given prompt and model name."""
+@lru_cache(maxsize=32)
+def _analyze_with_gemini(prompt: str, model_name: str = LITE_MODEL_NAME) -> str:
+    """Cached version of Gemini API calls"""
     if not API_KEY_CONFIGURED:
-        return f"Analysis skipped for '{analysis_type}': Google API Key is not configured."
+        return "Error: Google API Key not configured."
     
-    print(f"Qualitative Agent: Starting '{analysis_type}' analysis with model '{model_name}'...")
     try:
-        # MODIFIED: The model is now dynamically selected based on the parameter
         model = genai.GenerativeModel(model_name)
         response = model.generate_content(prompt)
-        print(f"Qualitative Agent: Finished '{analysis_type}' analysis.")
         return response.text
     except Exception as e:
-        print(f"An error occurred during '{analysis_type}' analysis: {e}")
-        return f"Could not generate '{analysis_type}' analysis. Please check the API key and backend status."
+        return f"Error in Gemini API call: {str(e)}"
 
-def _compare_transcripts(latest_transcript: str, previous_transcript: str) -> str:
-    """
-    Uses the Gemini model to compare and contrast two transcripts.
-    """
+def _compare_transcripts(latest_text: str, previous_text: str) -> str:
+    """Compare latest and previous transcripts"""
     prompt = f"""
-    You are an expert financial analyst. Your task is to compare and contrast the company's performance based on the two provided earnings conference call transcripts.
-
-    Analyze the tone, key metrics, management outlook, and any significant changes or new information between the two quarters.
-
-    **Latest Quarter Transcript:**
-    ---
-    {latest_transcript}
-    ---
-
-    **Previous Quarter Transcript:**
-    ---
-    {previous_transcript}
-    ---
-
-    **Your Task:**
-    Provide a structured comparison in Markdown format. Use bullet points and headers. Focus on:
-    - **Overall Sentiment Shift:** Did the management tone become more optimistic, cautious, or stay the same?
-    - **Financial & Operational Highlights:** Compare key performance indicators mentioned in both calls (e.g., revenue growth, margins, order book).
-    - **Segment Performance:** Note any changes in the performance of different business segments.
-    - **Outlook & Guidance:** Compare the future outlook or guidance provided in each call.
-    - **Key Concerns:** Did any concerns from the previous quarter get resolved? Are there any new concerns in the latest quarter?
-
-    Directly quote relevant phrases from BOTH transcripts to support your points.
+    Compare these two earnings call transcripts and highlight key changes:
+    
+    LATEST TRANSCRIPT:
+    {latest_text[:3000]}
+    
+    PREVIOUS TRANSCRIPT:
+    {previous_text[:3000]}
+    
+    Focus on:
+    1. Changes in business outlook
+    2. New developments or strategies
+    3. Management tone changes
+    4. Key metrics changes
     """
-    # MODIFIED: Now passes the LITE_MODEL_NAME for this task
-    return _analyze_with_gemini(prompt, "Quarter-over-Quarter Comparison", LITE_MODEL_NAME)
+    return _analyze_with_gemini(prompt, LITE_MODEL_NAME)
 
 def _analyze_positives_and_concerns(transcript_text: str) -> str:
-    """Analyzes a single transcript for positives and concerns."""
+    """Extract positives and concerns from transcript"""
     prompt = f"""
-    Based ONLY on the provided earnings conference call transcript, identify the key positives and areas of concern.
-    Structure your answer with two clear headings: "Positives" and "Areas of Concern".
-    Under each heading, use bullet points to list the key takeaways.
-    Directly quote relevant phrases or sentences from the transcript to support each point.
-
-    **Transcript:**
-    ---
-    {transcript_text}
-    ---
-    """
-    # MODIFIED: Now passes the LITE_MODEL_NAME for this task
-    return _analyze_with_gemini(prompt, "Positives & Concerns", LITE_MODEL_NAME)
-
-def _perform_scuttlebutt_analysis(company_name: str) -> str:
-    """Uses the Gemini model to perform an online scuttlebutt analysis."""
-    prompt = f"""
-    As a world-class financial analyst following Philip Fisher's "Scuttlebutt" method, conduct a deep investigation into the company: **{company_name}**.
+    Analyze this earnings call transcript and identify:
+    1. Key positive points
+    2. Main concerns or risks
+    3. Management's forward-looking statements
     
-    Your goal is to gather qualitative insights that are not typically found in financial statements. Search for and synthesize the most up-to-date information available as of **September 2025** from a wide range of sources including:
-    - Recent news articles, focusing on the period from **late 2024 to the present day**
-    - The latest industry reports and forum discussions
-    - Employee reviews (e.g., Glassdoor) posted within the last year
-    - Recent customer feedback and reviews
-    - Management interviews or public statements from **2025**
-    - Any recent supply chain or partner commentary
-    
-    **Synthesize your findings into a concise report covering these key areas:**
-    1.  **Competitive Landscape:** How is the company positioned against its main competitors? What are its key competitive advantages (moat)?
-    2.  **Management Quality & Culture:** What is the reputation of the CEO and the senior management team? What is the overall employee morale and company culture like?
-    3.  **Customer & Product Perception:** How do customers perceive the company's products or services? Are they seen as innovative, reliable, or a leader in their category?
-    4.  **Industry Trends & Headwinds:** What are the major tailwinds (positive trends) and headwinds (challenges) facing the industry and the company?
-    5.  **Red Flags:** Are there any potential issues, controversies, or risks that an investor should be aware of?
-
-    Provide a final summary of your overall impression. Use Markdown for formatting.
+    TRANSCRIPT:
+    {transcript_text[:4000]}
     """
-    # MODIFIED: Now passes the HEAVY_MODEL_NAME for this more complex task
-    return _analyze_with_gemini(prompt, f"Scuttlebutt Analysis for {company_name}", HEAVY_MODEL_NAME)
+    return _analyze_with_gemini(prompt, LITE_MODEL_NAME)
 
-def _check_sebi_violations(company_name: str) -> str:
-    """Uses the Gemini model to check for SEBI violations for a given company."""
+async def _perform_scuttlebutt_analysis(company_name: str, session: aiohttp.ClientSession) -> str:
+    """Perform web research about the company"""
     prompt = f"""
-    As a compliance officer, please conduct a thorough search for any publicly reported regulatory actions, penalties, or ongoing investigations by the Securities and Exchange Board of India (SEBI) involving the company: **{company_name}**.
-
-    Search for information related to:
-    - Insider trading violations.
-    - Financial misrepresentation or accounting fraud.
-    - Market manipulation.
-    - Non-compliance with listing obligations and disclosure requirements.
-    - Any other significant regulatory censures or penalties.
-
-    Please summarize your findings. If there are notable issues, provide a brief description and, if possible, the year of the event. If no significant violations are found in publicly accessible records, please state that clearly.
+    Based on recent news and market sentiment, analyze {company_name}'s:
+    1. Competitive position
+    2. Industry trends
+    3. Market reputation
+    4. Future growth prospects
     """
-    # MODIFIED: Now passes the HEAVY_MODEL_NAME for this more complex task
-    return _analyze_with_gemini(prompt, f"SEBI Violations Check for {company_name}", HEAVY_MODEL_NAME)
+    return _analyze_with_gemini(prompt, HEAVY_MODEL_NAME)
 
+async def _check_sebi_violations(company_name: str, session: aiohttp.ClientSession) -> str:
+    """Check for any regulatory issues"""
+    prompt = f"""
+    Research and report on {company_name}'s:
+    1. Recent SEBI compliance history
+    2. Any regulatory concerns
+    3. Corporate governance track record
+    """
+    return _analyze_with_gemini(prompt, HEAVY_MODEL_NAME)
 
-# MODIFIED: Updated main function to work with BytesIO instead of file paths
+async def _perform_web_analysis(company_name: str) -> Dict[str, str]:
+    """Run web-based analysis functions concurrently"""
+    async with aiohttp.ClientSession() as session:
+        tasks = [
+            asyncio.create_task(_perform_scuttlebutt_analysis(company_name, session)),
+            asyncio.create_task(_check_sebi_violations(company_name, session))
+        ]
+        scuttlebutt, sebi_check = await asyncio.gather(*tasks)
+        return {
+            "scuttlebutt": scuttlebutt,
+            "sebi_check": sebi_check
+        }
+
 def run_qualitative_analysis(
     company_name: str, 
     latest_transcript_buffer: io.BytesIO | None, 
     previous_transcript_buffer: io.BytesIO | None
 ) -> Dict[str, Optional[str]]:
     """
-    The main function to run the entire qualitative analysis pipeline.
-    Now accepts transcript data as BytesIO objects instead of file paths.
-
+    Main analysis function with concurrent processing.
     Args:
         company_name: Name of the company to analyze
-        latest_transcript_buffer: Latest transcript PDF as BytesIO object
-        previous_transcript_buffer: Previous transcript PDF as BytesIO object
-
+        latest_transcript_buffer: Latest transcript PDF as BytesIO
+        previous_transcript_buffer: Previous transcript PDF as BytesIO
     Returns:
         Dictionary containing analysis results
     """
+    print("\n🔍 Starting Qualitative Analysis...")
+    print(f"📊 Analyzing {company_name}")
+
     results = {
         "positives_and_concerns": None,
         "qoq_comparison": None,
@@ -190,30 +149,29 @@ def run_qualitative_analysis(
         "sebi_check": None
     }
 
-    # --- Transcript-Based Analysis ---
-    if latest_transcript_buffer:
-        latest_text = _extract_text_from_pdf_buffer(latest_transcript_buffer)
-        if latest_text:
-            results["positives_and_concerns"] = _analyze_positives_and_concerns(latest_text)
+    # Process transcripts in parallel
+    with ThreadPoolExecutor() as executor:
+        if latest_transcript_buffer:
+            print("📚 Processing transcripts in parallel...")
+            latest_text_future = executor.submit(_extract_text_from_pdf_buffer, latest_transcript_buffer)
+            previous_text_future = executor.submit(_extract_text_from_pdf_buffer, previous_transcript_buffer) if previous_transcript_buffer else None
             
-            if previous_transcript_buffer:
-                previous_text = _extract_text_from_pdf_buffer(previous_transcript_buffer)
-                if previous_text:
-                    results["qoq_comparison"] = _compare_transcripts(latest_text, previous_text)
-                else:
-                    results["qoq_comparison"] = "Could not extract text from the previous quarter's transcript."
-            else:
-                results["qoq_comparison"] = "Previous quarter transcript not available for comparison."
-        else:
-            results["positives_and_concerns"] = "Could not extract text from the latest transcript."
-            results["qoq_comparison"] = "Analysis skipped as latest transcript could not be read."
-    else:
-        results["positives_and_concerns"] = "Latest transcript not available."
-        results["qoq_comparison"] = "Latest transcript not available."
+            latest_text = latest_text_future.result()
+            if latest_text:
+                print("📝 Analyzing latest transcript...")
+                results["positives_and_concerns"] = _analyze_positives_and_concerns(latest_text)
+                
+                if previous_text_future:
+                    previous_text = previous_text_future.result()
+                    if previous_text:
+                        print("🔄 Performing QoQ comparison...")
+                        results["qoq_comparison"] = _compare_transcripts(latest_text, previous_text)
 
-    # --- Web-Based Analysis ---
+    # Run web analysis concurrently
     if company_name:
-        results["scuttlebutt"] = _perform_scuttlebutt_analysis(company_name)
-        results["sebi_check"] = _check_sebi_violations(company_name)
+        print("🌐 Running web analysis...")
+        web_results = asyncio.run(_perform_web_analysis(company_name))
+        results.update(web_results)
     
+    print("✅ Qualitative Analysis complete!\n")
     return results
