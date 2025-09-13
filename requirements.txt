@@ -24,3 +24,7 @@ PyMuPDF
 
 matplotlib
 tabulate
+
+# Async support for optimized web operations
+aiohttp
+asyncio
