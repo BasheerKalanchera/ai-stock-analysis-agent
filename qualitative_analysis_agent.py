@@ -31,17 +31,15 @@ HEAVY_MODEL_NAME = os.getenv("HEAVY_MODEL_NAME", "gemini-1.5-pro")
 # --- Core Functions ---
 def _extract_text_from_pdf_buffer(pdf_buffer: io.BytesIO | None) -> str:
     """Optimized PDF text extraction"""
+    print("  (BACKGROUND THREAD: STARTING PDF text extraction...)")
     if not pdf_buffer:
         return ""
     try:
-        print("📄 Extracting text from transcript...")
+        # Use PyMuPDF to read PDF directly from memory buffer
         with fitz.open(stream=pdf_buffer.getvalue(), filetype="pdf") as doc:
-            text_blocks = []
-            for page in doc:
-                text_blocks.append(page.get_text())
-            text = "\n".join(text_blocks)
-        print("✅ Text extraction complete")
-        return text
+            full_text = "".join(page.get_text() for page in doc)
+        print("  (BACKGROUND THREAD: FINISHED PDF text extraction.)")    
+        return full_text
     except Exception as e:
         print(f"Error reading PDF from buffer: {e}")
         return ""
@@ -55,6 +53,7 @@ def _analyze_with_gemini(prompt: str, model_name: str = LITE_MODEL_NAME) -> str:
     try:
         model = genai.GenerativeModel(model_name)
         response = model.generate_content(prompt)
+        print("  (BACKGROUND THREAD: FINISHING analysis with gemini...)")
         return response.text
     except Exception as e:
         return f"Error in Gemini API call: {str(e)}"
@@ -65,10 +64,10 @@ def _compare_transcripts(latest_text: str, previous_text: str) -> str:
     Compare these two earnings call transcripts and highlight key changes:
     
     LATEST TRANSCRIPT:
-    {latest_text[:3000]}
+    {latest_text}
     
     PREVIOUS TRANSCRIPT:
-    {previous_text[:3000]}
+    {previous_text}
     
     Focus on:
     1. Changes in business outlook
@@ -87,12 +86,13 @@ def _analyze_positives_and_concerns(transcript_text: str) -> str:
     3. Management's forward-looking statements
     
     TRANSCRIPT:
-    {transcript_text[:4000]}
+    {transcript_text}
     """
     return _analyze_with_gemini(prompt, LITE_MODEL_NAME)
 
 async def _perform_scuttlebutt_analysis(company_name: str, session: aiohttp.ClientSession) -> str:
     """Perform web research about the company"""
+    print("  (BACKGROUND THREAD: STARTING suttlebutt analysis...)")
     prompt = f"""
     Based on recent news and market sentiment, analyze {company_name}'s:
     1. Competitive position
@@ -100,10 +100,12 @@ async def _perform_scuttlebutt_analysis(company_name: str, session: aiohttp.Clie
     3. Market reputation
     4. Future growth prospects
     """
+    print("  (BACKGROUND THREAD: FINISHED suttlebutt analysis...)")
     return _analyze_with_gemini(prompt, HEAVY_MODEL_NAME)
 
 async def _check_sebi_violations(company_name: str, session: aiohttp.ClientSession) -> str:
     """Check for any regulatory issues"""
+    print("  (BACKGROUND THREAD: STARTING SEBI violations analysis...)")
     prompt = f"""
     Research and report on {company_name}'s:
     1. Recent SEBI compliance history
@@ -114,12 +116,14 @@ async def _check_sebi_violations(company_name: str, session: aiohttp.ClientSessi
 
 async def _perform_web_analysis(company_name: str) -> Dict[str, str]:
     """Run web-based analysis functions concurrently"""
+    print("  (BACKGROUND THREAD: STARTING web analysis...)")
     async with aiohttp.ClientSession() as session:
         tasks = [
             asyncio.create_task(_perform_scuttlebutt_analysis(company_name, session)),
             asyncio.create_task(_check_sebi_violations(company_name, session))
         ]
         scuttlebutt, sebi_check = await asyncio.gather(*tasks)
+        print("  (BACKGROUND THREAD: FINISHING web analysis...)")
         return {
             "scuttlebutt": scuttlebutt,
             "sebi_check": sebi_check
@@ -149,13 +153,33 @@ def run_qualitative_analysis(
         "sebi_check": None
     }
 
-    # Process transcripts in parallel
-    with ThreadPoolExecutor() as executor:
+    # Use a single ThreadPoolExecutor to manage all concurrent tasks
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        # --- Step 1: Submit ALL concurrent tasks immediately ---
+        print("🚀 Kicking off all analysis tasks in parallel...")
+
+        # Submit PDF processing tasks
+        latest_text_future = None
         if latest_transcript_buffer:
-            print("📚 Processing transcripts in parallel...")
             latest_text_future = executor.submit(_extract_text_from_pdf_buffer, latest_transcript_buffer)
-            previous_text_future = executor.submit(_extract_text_from_pdf_buffer, previous_transcript_buffer) if previous_transcript_buffer else None
-            
+
+        previous_text_future = None
+        if previous_transcript_buffer:
+            previous_text_future = executor.submit(_extract_text_from_pdf_buffer, previous_transcript_buffer)
+
+        # Submit Web Analysis task using a lambda to defer execution
+        web_analysis_future = None
+        if company_name:
+            # The lambda ensures the entire asyncio.run(...) call happens
+            # inside the background thread, not in the main thread.
+            web_analysis_future = executor.submit(
+                lambda: asyncio.run(_perform_web_analysis(company_name))
+            )
+
+        # --- Step 2: Collect and process results as they are needed ---
+        
+        # Now, wait for and process the transcript results
+        if latest_text_future:
             latest_text = latest_text_future.result()
             if latest_text:
                 print("📝 Analyzing latest transcript...")
@@ -167,11 +191,11 @@ def run_qualitative_analysis(
                         print("🔄 Performing QoQ comparison...")
                         results["qoq_comparison"] = _compare_transcripts(latest_text, previous_text)
 
-    # Run web analysis concurrently
-    if company_name:
-        print("🌐 Running web analysis...")
-        web_results = asyncio.run(_perform_web_analysis(company_name))
-        results.update(web_results)
-    
+        # Finally, wait for and collect the web analysis results
+        if web_analysis_future:
+            print("🌐 Collecting web analysis results...")
+            web_results = web_analysis_future.result()
+            results.update(web_results)
+
     print("✅ Qualitative Analysis complete!\n")
     return results
