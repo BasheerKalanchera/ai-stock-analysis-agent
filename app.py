@@ -126,9 +126,13 @@ def qualitative_analysis_node(state: StockAnalysisState):
 def synthesis_node(state: StockAnalysisState):
     st.toast("Executing Agent 4: Synthesis Agent...")
     log_content_accumulator = state['log_file_content']
+    
+    # Safely get the quantitative text. Provide a default message if it's missing.
+    quant_text = state.get('quant_text_for_synthesis', "Quantitative analysis was not performed.")
+    
     report = generate_investment_summary(
         state['company_name'] or state['ticker'],
-        state['quant_text_for_synthesis'],
+        quant_text, # Use the safe variable here
         state['qualitative_results']
     )
     
@@ -140,12 +144,21 @@ def generate_report_node(state: StockAnalysisState):
     
     pdf_buffer = io.BytesIO()
     
+    # Safely get the structured quantitative results.
+    # Default to an empty list if the key is not found.
+    quant_results = state.get('quant_results_structured', [])
+    
+    # Safely get other potentially missing keys as well for maximum stability
+    company_name = state.get('company_name')
+    qual_results = state.get('qualitative_results', {})
+    final_report = state.get('final_report', "Report could not be fully generated.")
+
     create_pdf_report(
         ticker=state['ticker'],
-        company_name=state['company_name'],
-        quant_results=state['quant_results_structured'],
-        qual_results=state['qualitative_results'],
-        final_report=state['final_report'],
+        company_name=company_name,
+        quant_results=quant_results, # Use the safe variable
+        qual_results=qual_results,
+        final_report=final_report,
         file_path=pdf_buffer
     )
     pdf_buffer.seek(0)
@@ -161,9 +174,10 @@ workflow.add_node("generate_report", generate_report_node)
 
 workflow.set_entry_point("fetch_data")
 
-workflow.add_edge("fetch_data", "quantitative_analysis")
+#workflow.add_edge("fetch_data", "quantitative_analysis")
 workflow.add_edge("fetch_data", "qualitative_analysis")
-workflow.add_edge(["quantitative_analysis", "qualitative_analysis"], "synthesis")
+#workflow.add_edge(["quantitative_analysis", "qualitative_analysis"], "synthesis")
+workflow.add_edge("qualitative_analysis", "synthesis")
 workflow.add_edge("synthesis", "generate_report")
 workflow.add_edge("generate_report", END)
 
