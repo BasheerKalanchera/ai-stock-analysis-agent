@@ -116,25 +116,54 @@ def download_financial_data(
             transcripts_xpath = "//h3[normalize-space()='Concalls']/following::a[contains(@class, 'concall-link') and contains(text(),'Transcript')]"
             
             transcript_elems = wait.until(EC.presence_of_all_elements_located((By.XPATH, transcripts_xpath)))
-            print(f"Found {len(transcript_elems)} transcript links.")
+            # Initialize a counter specifically for this loop's downloads.
+            successful_downloads = 0
 
-            for i, _ in enumerate(transcript_elems[:2]):  # Get only first two transcripts
-                files_before = os.listdir(temp_download_dir)
-                current_transcript_link = driver.find_elements(By.XPATH, transcripts_xpath)[i]
-                driver.execute_script("arguments[0].click();", current_transcript_link)
+            print(f"Found {len(transcript_elems)} transcript links. Attempting to download two valid ones.")
+
+            # Loop through ALL available transcript elements.
+            for i, _ in enumerate(transcript_elems):
                 
-                new_filename = wait_for_new_file(temp_download_dir, files_before, timeout=20)
-                if new_filename:
-                    transcript_path = os.path.join(temp_download_dir, new_filename)
-                    with open(transcript_path, 'rb') as f:
-                        transcript_buffer = io.BytesIO(f.read())
+                # Check the dedicated counter to see if we have our two transcripts.
+                if successful_downloads == 2:
+                    print("Successfully downloaded two transcripts. Stopping.")
+                    break
+
+                try:
+                    files_before = os.listdir(temp_download_dir)
+                    current_transcript_link = driver.find_elements(By.XPATH, transcripts_xpath)[i]
+                    driver.execute_script("arguments[0].click();", current_transcript_link)
                     
-                    key = 'latest_transcript' if i == 0 else 'previous_transcript'
-                    file_buffers[key] = transcript_buffer
-                    os.remove(transcript_path)  # Clean up temp file
+                    new_filename = wait_for_new_file(temp_download_dir, files_before, timeout=20)
                     
+                    if new_filename:
+                        print(f"Success: Downloaded transcript from link #{i+1}.")
+                        transcript_path = os.path.join(temp_download_dir, new_filename)
+                        with open(transcript_path, 'rb') as f:
+                            transcript_buffer = io.BytesIO(f.read())
+                        
+                        # Use the dedicated counter to assign the correct key.
+                        key = 'latest_transcript' if successful_downloads == 0 else 'previous_transcript'
+                        file_buffers[key] = transcript_buffer
+                        
+                        # IMPORTANT: Increment the counter only after a successful download.
+                        successful_downloads += 1
+                        
+                        os.remove(transcript_path)  # Clean up temp file
+                    else:
+                        print(f"Warning: Download failed or timed out for link #{i+1}. Trying next link.")
+
+                except Exception as e:
+                    print(f"Error processing link #{i+1}: {e}. Trying next link.")
+                    pass # Continue to the navigation part
+                
+                # Use the dedicated counter to decide whether to navigate back.
+                if successful_downloads < 2:
                     driver.get(f"https://www.screener.in/company/{ticker}/#documents/")
                     wait.until(EC.visibility_of_element_located((By.XPATH, "//h2[normalize-space()='Documents']")))
+
+            # Final status update
+            print(f"Loop finished. Total new transcripts downloaded: {successful_downloads}.")
 
         except TimeoutException as te:
             print(f"Timeout occurred: {te}")

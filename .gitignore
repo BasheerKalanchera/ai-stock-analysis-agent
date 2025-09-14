@@ -20,3 +20,6 @@ reports/
 
 # Ignore Streamlit secrets and other sensitive files
 .streamlit/secrets.toml
+
+# Ignore .vscode
+ .vscode/
