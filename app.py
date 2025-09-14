@@ -174,10 +174,10 @@ workflow.add_node("generate_report", generate_report_node)
 
 workflow.set_entry_point("fetch_data")
 
-#workflow.add_edge("fetch_data", "quantitative_analysis")
+workflow.add_edge("fetch_data", "quantitative_analysis")
 workflow.add_edge("fetch_data", "qualitative_analysis")
-#workflow.add_edge(["quantitative_analysis", "qualitative_analysis"], "synthesis")
-workflow.add_edge("qualitative_analysis", "synthesis")
+workflow.add_edge(["quantitative_analysis", "qualitative_analysis"], "synthesis")
+#workflow.add_edge("qualitative_analysis", "synthesis")
 workflow.add_edge("synthesis", "generate_report")
 workflow.add_edge("generate_report", END)
 
