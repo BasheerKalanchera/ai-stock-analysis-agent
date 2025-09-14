@@ -4,7 +4,8 @@ import os
 import shutil
 import time
 from typing import Dict, Optional, Tuple
-import logging # <-- ADD THIS IMPORT
+import logging
+import streamlit as st # <-- ADDED IMPORT
 
 from dotenv import load_dotenv
 from selenium import webdriver
@@ -17,9 +18,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 # webdriver-manager is only needed for local development
 from webdriver_manager.chrome import ChromeDriverManager
 
-# --- ADD THIS LOGGING CONFIGURATION ---
+# --- LOGGING CONFIGURATION ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-# --- END LOGGING CONFIGURATION ---
 
 
 def wait_for_new_file(download_path: str, files_before: list, timeout: int = 60) -> str | None:
@@ -64,9 +64,10 @@ def download_financial_data(
     file_buffers = {}
 
     try:
-        # --- DYNAMIC DRIVER INITIALIZATION ---
-        if os.environ.get("STREAMLIT_SERVER_RUNNING_IN_CLOUD") == "true":
-            logging.info("Running in Streamlit Cloud. Initializing Chromium Driver...")
+        # --- THE FIX: A MORE ROBUST ENVIRONMENT CHECK ---
+        # Check if Streamlit secrets are available, which only happens in the cloud.
+        if hasattr(st, 'secrets') and st.secrets.get("SCREENER_EMAIL"):
+            logging.info("Running in Streamlit Cloud (detected via st.secrets). Initializing Chromium Driver...")
             chrome_options.add_argument("--headless")
             chrome_options.add_argument("--no-sandbox")
             chrome_options.add_argument("--disable-dev-shm-usage")
@@ -74,17 +75,14 @@ def download_financial_data(
             chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
             chrome_options.add_argument("--window-size=1920,1080")
             
-            # --- ADDED DEBUGGING BLOCK ---
             try:
                 logging.info("Attempting to initialize WebDriver with explicit service path...")
                 service = Service("/usr/bin/chromedriver")
                 driver = webdriver.Chrome(service=service, options=chrome_options)
                 logging.info("WebDriver initialized successfully.")
             except Exception as e:
-                logging.error(f"FATAL: Failed to initialize WebDriver: {e}", exc_info=True)
-                # Return early if driver fails, so we can see the log
+                logging.error(f"FATAL: Failed to initialize WebDriver in Cloud: {e}", exc_info=True)
                 return None, {}
-            # --- END DEBUGGING BLOCK ---
 
         else:
             logging.info("Running locally. Initializing Chrome Driver (headless)...")
@@ -109,9 +107,6 @@ def download_financial_data(
 
         wait.until(EC.presence_of_element_located((By.XPATH, "//input[@placeholder='Search for a company']")))
         logging.info("Login successful.")
-
-        # ... (rest of the function continues as before) ...
-        # (I have also replaced all print() calls with logging.info() for consistency)
 
         url = f"https://www.screener.in/company/{ticker}/{'consolidated/' if is_consolidated else ''}"
         driver.get(url)
