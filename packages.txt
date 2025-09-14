@@ -1,1 +1,11 @@
-"google-chrome-stable" 
+# Use a multi-line script to add the Google Chrome repository and install it.
+# 1. Install prerequisites for adding a new repository.
+apt-get update && apt-get install -y wget gnupg
+# 2. Add Google's official signing key.
+wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome-keyring.gpg
+# 3. Add the Google Chrome repository to the system's sources.
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+# 4. Update the package list again to include the new repository.
+apt-get update
+# 5. Install Google Chrome.
+apt-get install -y google-chrome-stable
