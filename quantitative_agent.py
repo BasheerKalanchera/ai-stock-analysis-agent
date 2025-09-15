@@ -7,9 +7,6 @@ import datetime
 import io
 import logging
 from typing import List, Dict, Any
-from colorama import Fore, Style, init
-
-init(autoreset=True)
 
 # --- CUSTOM LOGGER SETUP ---
 # 1. Get a custom logger
@@ -20,7 +17,7 @@ logger.setLevel(logging.INFO)
 handler = logging.StreamHandler()
 
 # 3. Create a custom formatter and set it for the handler
-formatter = logging.Formatter(f'%(asctime)s - 🟢 QUANT{Style.RESET_ALL} - %(message)s')
+formatter = logging.Formatter(f'%(asctime)s - 🟢 QUANT - %(message)s')
 handler.setFormatter(formatter)
 
 # 4. Add the handler to the logger

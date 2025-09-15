@@ -10,7 +10,7 @@ logger.setLevel(logging.INFO)
 handler = logging.StreamHandler()
 
 # 3. Create a custom formatter and set it for the handler
-formatter = logging.Formatter('%(asctime)s - SYNTH - %(message)s')
+formatter = logging.Formatter('%(asctime)s - 🔵 SYNTH - %(message)s')
 handler.setFormatter(formatter)
 
 # 4. Add the handler to the logger

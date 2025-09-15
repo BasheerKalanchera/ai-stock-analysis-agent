@@ -5,10 +5,6 @@ import google.generativeai as genai
 from typing import Optional, Dict
 from functools import lru_cache
 import logging
-from colorama import Fore, Style, init
-
-# Initialize colorama to automatically reset colors after each print
-init(autoreset=True)
 
 # --- CUSTOM LOGGER SETUP ---
 # 1. Get a custom logger
@@ -19,7 +15,7 @@ logger.setLevel(logging.INFO)
 handler = logging.StreamHandler()
 
 # 3. Create a custom formatter and set it for the handler
-formatter = logging.Formatter(f'%(asctime)s - 🟡 QUAL{Style.RESET_ALL} - %(message)s')
+formatter = logging.Formatter(f'%(asctime)s - 🟡 QUAL - %(message)s')
 handler.setFormatter(formatter)
 
 # 4. Add the handler to the logger
