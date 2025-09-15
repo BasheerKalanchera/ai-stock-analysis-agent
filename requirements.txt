@@ -28,3 +28,6 @@ tabulate
 # Async support for optimized web operations
 aiohttp
 asyncio
+
+# for colored terminal output
+colorama
