@@ -17,21 +17,28 @@ from report_generator import create_pdf_report
 
 # --- Page Configuration ---
 st.set_page_config(page_title="AI Stock Analysis Crew", page_icon="🤖", layout="wide")
+load_dotenv() # Load .env file for local development
 
-# --- UNIFIED SECRETS & ENV VARIABLE HANDLING ---
-# This pattern works for both local development (using .env) and Streamlit Cloud
-load_dotenv()
-SCREENER_EMAIL = st.secrets.get("SCREENER_EMAIL", os.getenv("SCREENER_EMAIL"))
-SCREENER_PASSWORD = st.secrets.get("SCREENER_PASSWORD", os.getenv("SCREENER_PASSWORD"))
+# --- THE FIX: ROBUST SECRET HANDLING ---
+# This pattern correctly handles both local (.env) and cloud (st.secrets) environments.
+try:
+    # This will succeed on Streamlit Cloud
+    SCREENER_EMAIL = st.secrets["SCREENER_EMAIL"]
+    SCREENER_PASSWORD = st.secrets["SCREENER_PASSWORD"]
+except st.errors.StreamlitAPIException as e:
+    # This will happen locally if secrets.toml doesn't exist
+    if "No secrets found" in str(e):
+        SCREENER_EMAIL = os.getenv("SCREENER_EMAIL")
+        SCREENER_PASSWORD = os.getenv("SCREENER_PASSWORD")
+    else:
+        raise e # Reraise other potential errors
 
-# --- Directory Setup for Local Development ---
-# On Streamlit Cloud, the filesystem is ephemeral. These directories will be temporary.
-#LOG_DIRECTORY = "logs"
-#REPORTS_DIRECTORY = "reports"
-#DOWNLOAD_DIRECTORY = "downloads"
-#for directory in [LOG_DIRECTORY, REPORTS_DIRECTORY, DOWNLOAD_DIRECTORY]:
-#    if not os.path.exists(directory):
-#        os.makedirs(directory)
+# Check if secrets were loaded successfully
+if not SCREENER_EMAIL or not SCREENER_PASSWORD:
+    st.error("Screener credentials not found. Please set them in your .env file locally or in st.secrets for cloud deployment.")
+    st.stop()
+# --- END OF FIX ---
+
 
 # --- Define Graph State ---
 class StockAnalysisState(TypedDict):
@@ -41,7 +48,7 @@ class StockAnalysisState(TypedDict):
     """
     ticker: str
     company_name: str | None
-    file_data: Dict[str, io.BytesIO]  # Holds Excel and PDF data in memory
+    file_data: Dict[str, io.BytesIO]
     quant_results_structured: List[Dict[str, Any]] | None
     quant_text_for_synthesis: str | None
     qualitative_results: Dict[str, Any] | None
@@ -58,7 +65,6 @@ def fetch_data_node(state: StockAnalysisState):
     
     log_content_accumulator = state.get('log_file_content', "")
 
-    # Get file data in memory instead of paths
     company_name, file_data = download_financial_data(
         ticker,
         SCREENER_EMAIL,
@@ -91,7 +97,6 @@ def quantitative_analysis_node(state: StockAnalysisState):
         text_results = "Quantitative analysis skipped: Excel data not found."
         structured_results = [{"type": "text", "content": text_results}]
     else:
-        # Pass BytesIO object instead of file path
         structured_results = analyze_financials(excel_data, state['ticker'])
         text_results = "\n".join([item['content'] for item in structured_results if item['type'] == 'text'])
 
@@ -108,7 +113,6 @@ def qualitative_analysis_node(state: StockAnalysisState):
     company = state['company_name'] or state['ticker']
     log_content_accumulator = state['log_file_content']
     
-    # Pass BytesIO objects instead of file paths
     results = run_qualitative_analysis(
         company, 
         state['file_data'].get("latest_transcript"),
@@ -127,12 +131,11 @@ def synthesis_node(state: StockAnalysisState):
     st.toast("Executing Agent 4: Synthesis Agent...")
     log_content_accumulator = state['log_file_content']
     
-    # Safely get the quantitative text. Provide a default message if it's missing.
     quant_text = state.get('quant_text_for_synthesis', "Quantitative analysis was not performed.")
     
     report = generate_investment_summary(
         state['company_name'] or state['ticker'],
-        quant_text, # Use the safe variable here
+        quant_text,
         state['qualitative_results']
     )
     
@@ -144,11 +147,7 @@ def generate_report_node(state: StockAnalysisState):
     
     pdf_buffer = io.BytesIO()
     
-    # Safely get the structured quantitative results.
-    # Default to an empty list if the key is not found.
     quant_results = state.get('quant_results_structured', [])
-    
-    # Safely get other potentially missing keys as well for maximum stability
     company_name = state.get('company_name')
     qual_results = state.get('qualitative_results', {})
     final_report = state.get('final_report', "Report could not be fully generated.")
@@ -156,7 +155,7 @@ def generate_report_node(state: StockAnalysisState):
     create_pdf_report(
         ticker=state['ticker'],
         company_name=company_name,
-        quant_results=quant_results, # Use the safe variable
+        quant_results=quant_results,
         qual_results=qual_results,
         final_report=final_report,
         file_path=pdf_buffer
@@ -177,7 +176,6 @@ workflow.set_entry_point("fetch_data")
 workflow.add_edge("fetch_data", "quantitative_analysis")
 workflow.add_edge("fetch_data", "qualitative_analysis")
 workflow.add_edge(["quantitative_analysis", "qualitative_analysis"], "synthesis")
-#workflow.add_edge("qualitative_analysis", "synthesis")
 workflow.add_edge("synthesis", "generate_report")
 workflow.add_edge("generate_report", END)
 
@@ -219,7 +217,6 @@ if st.sidebar.button("🚀 Run Full Analysis", type="primary"):
             try:
                 for event in app_graph.stream(inputs):
                     for node_name, node_output in event.items():
-                        # Update status message based on current node
                         status_messages = {
                             "fetch_data": "Downloading financial data...",
                             "quantitative_analysis": "Running quantitative analysis...",
@@ -280,3 +277,4 @@ if st.session_state.final_state:
                 st.markdown(f"**{key.replace('_', ' ').title()}:** {value}")
 else:
     st.info("Enter a stock ticker in the sidebar and click 'Run Full Analysis' to begin.")
+
