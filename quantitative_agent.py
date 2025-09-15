@@ -20,7 +20,7 @@ logger.setLevel(logging.INFO)
 handler = logging.StreamHandler()
 
 # 3. Create a custom formatter and set it for the handler
-formatter = logging.Formatter(f'%(asctime)s - {Fore.GREEN}QUANT{Style.RESET_ALL} - %(message)s')
+formatter = logging.Formatter(f'%(asctime)s - 🟢 QUANT{Style.RESET_ALL} - %(message)s')
 handler.setFormatter(formatter)
 
 # 4. Add the handler to the logger
