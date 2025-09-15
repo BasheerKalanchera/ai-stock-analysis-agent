@@ -1,22 +1,25 @@
 import io
 import fitz
 import asyncio
-import aiohttp
 import google.generativeai as genai
 from typing import Optional, Dict
 from functools import lru_cache
-from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 # --- Core Functions ---
+def _timestamp(msg: str):
+    """Helper for timestamped logs"""
+    print(f"{datetime.now().strftime('%H:%M:%S')} | {msg}")
+
 def _extract_text_from_pdf_buffer(pdf_buffer: io.BytesIO | None) -> str:
     """Optimized PDF text extraction"""
-    print("  (BACKGROUND THREAD: STARTING PDF text extraction...)")
+    _timestamp("BACKGROUND THREAD: STARTING PDF text extraction...")
     if not pdf_buffer:
         return ""
     try:
         with fitz.open(stream=pdf_buffer.getvalue(), filetype="pdf") as doc:
             full_text = "".join(page.get_text() for page in doc)
-        print("  (BACKGROUND THREAD: FINISHED PDF text extraction.)")    
+        _timestamp("BACKGROUND THREAD: FINISHED PDF text extraction.")    
         return full_text
     except Exception as e:
         print(f"Error reading PDF from buffer: {e}")
@@ -32,10 +35,10 @@ def _analyze_with_gemini(prompt: str, analysis_type: str, model_name: str, api_k
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(model_name)
         response = model.generate_content(prompt)
-        print(f"BACKGROUND THREAD: Finished '{analysis_type}' analysis.")
+        _timestamp(f"BACKGROUND THREAD: Finished '{analysis_type}' analysis.")
         return response.text
     except Exception as e:
-        return f"Could not generate '{analysis_type}' analysis. Please check the API key and backend status.: {str(e)}"
+        return f"Could not generate '{analysis_type}' analysis. {str(e)}"
 
 def _compare_transcripts(latest_text: str, previous_text: str, agent_config: dict) -> str:
     """Compare latest and previous transcripts"""
@@ -58,9 +61,9 @@ def _compare_transcripts(latest_text: str, previous_text: str, agent_config: dic
     - **Key Concerns:** Did any concerns from the previous quarter get resolved? Are there any new concerns in the latest quarter?
     Directly quote relevant phrases from BOTH transcripts to support your points.
     """
-    api_key = agent_config.get("GOOGLE_API_KEY")
-    model_name = agent_config.get("LITE_MODEL_NAME", "gemini-1.5-flash")
-    return _analyze_with_gemini(prompt, "Quarter-over-Quarter Comparison", model_name, api_key)
+    return _analyze_with_gemini(prompt, "Quarter-over-Quarter Comparison",
+                                agent_config.get("LITE_MODEL_NAME", "gemini-1.5-flash"),
+                                agent_config.get("GOOGLE_API_KEY"))
 
 def _analyze_positives_and_concerns(transcript_text: str, agent_config: dict) -> str:
     """Extract positives and concerns from transcript"""
@@ -73,13 +76,12 @@ def _analyze_positives_and_concerns(transcript_text: str, agent_config: dict) ->
     ---
     {transcript_text}
     """
-    api_key = agent_config.get("GOOGLE_API_KEY")
-    model_name = agent_config.get("LITE_MODEL_NAME", "gemini-1.5-flash")
-    return _analyze_with_gemini(prompt, "Positives & Concerns", model_name, api_key)
+    return _analyze_with_gemini(prompt, "Positives & Concerns",
+                                agent_config.get("LITE_MODEL_NAME", "gemini-1.5-flash"),
+                                agent_config.get("GOOGLE_API_KEY"))
 
-async def _perform_scuttlebutt_analysis(company_name: str, session: aiohttp.ClientSession, agent_config: dict) -> str:
-    """Perform web research about the company"""
-    print("  (BACKGROUND THREAD: STARTING scuttlebutt analysis...)")
+def _scuttlebutt_sync(company_name: str, agent_config: dict) -> str:
+    _timestamp("BACKGROUND THREAD: STARTING scuttlebutt analysis...")
     prompt = f"""
     As a world-class financial analyst following Philip Fisher's "Scuttlebutt" method, conduct a deep investigation into the company: **{company_name}**.
     Your goal is to gather qualitative insights that are not typically found in financial statements. Search for and synthesize the most up-to-date information available as of **September 2025** from a wide range of sources including:
@@ -97,13 +99,12 @@ async def _perform_scuttlebutt_analysis(company_name: str, session: aiohttp.Clie
     5.  **Red Flags:** Are there any potential issues, controversies, or risks that an investor should be aware of?
     Provide a final summary of your overall impression. Use Markdown for formatting.
     """
-    api_key = agent_config.get("GOOGLE_API_KEY")
-    model_name = agent_config.get("HEAVY_MODEL_NAME", "gemini-1.5-pro")
-    return _analyze_with_gemini(prompt, "Scuttlebutt Analysis", model_name, api_key)
+    return _analyze_with_gemini(prompt, "Scuttlebutt Analysis",
+                                agent_config.get("HEAVY_MODEL_NAME", "gemini-1.5-pro"),
+                                agent_config.get("GOOGLE_API_KEY"))
 
-async def _check_sebi_violations(company_name: str, session: aiohttp.ClientSession, agent_config: dict) -> str:
-    """Check for any regulatory issues"""
-    print("  (BACKGROUND THREAD: STARTING SEBI violations analysis...)")
+def _sebi_sync(company_name: str, agent_config: dict) -> str:
+    _timestamp("BACKGROUND THREAD: STARTING SEBI violations analysis...")
     prompt = f"""
     As a compliance officer, please conduct a thorough search for any publicly reported regulatory actions, penalties, or ongoing investigations by the Securities and Exchange Board of India (SEBI) involving the company: **{company_name}**.
     Search for information related to:
@@ -114,32 +115,17 @@ async def _check_sebi_violations(company_name: str, session: aiohttp.ClientSessi
     - Any other significant regulatory censures or penalties.
     Please summarize your findings. If there are notable issues, provide a brief description and, if possible, the year of the event. If no significant violations are found in publicly accessible records, please state that clearly.
     """
-    api_key = agent_config.get("GOOGLE_API_KEY")
-    model_name = agent_config.get("HEAVY_MODEL_NAME", "gemini-1.5-pro")
-    return _analyze_with_gemini(prompt, "SEBI Violations Analysis", model_name, api_key)
+    return _analyze_with_gemini(prompt, "SEBI Violations Analysis",
+                                agent_config.get("HEAVY_MODEL_NAME", "gemini-1.5-pro"),
+                                agent_config.get("GOOGLE_API_KEY"))
 
-async def _perform_web_analysis(company_name: str, agent_config: dict) -> Dict[str, str]:
-    """Run web-based analysis functions concurrently"""
-    print("  (BACKGROUND THREAD: STARTING web analysis...)")
-    async with aiohttp.ClientSession() as session:
-        tasks = [
-            asyncio.create_task(_perform_scuttlebutt_analysis(company_name, session, agent_config)),
-            asyncio.create_task(_check_sebi_violations(company_name, session, agent_config))
-        ]
-        scuttlebutt, sebi_check = await asyncio.gather(*tasks)
-        print("  (BACKGROUND THREAD: FINISHING web analysis...)")
-        return {"scuttlebutt": scuttlebutt, "sebi_check": sebi_check}
-
-def run_qualitative_analysis(
+# --- Async Orchestrator using asyncio.to_thread ---
+async def run_qualitative_analysis_async(
     company_name: str, 
     latest_transcript_buffer: io.BytesIO | None, 
     previous_transcript_buffer: io.BytesIO | None,
     agent_config: dict
 ) -> Dict[str, Optional[str]]:
-    """
-    Main analysis function with concurrent processing.
-    Accepts an agent_config dictionary for API key and model names.
-    """
     print("\n🔍 Starting Qualitative Analysis...")
     print(f"📊 Analyzing {company_name}")
 
@@ -149,34 +135,61 @@ def run_qualitative_analysis(
         "scuttlebutt": None,
         "sebi_check": None
     }
-    
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        print("🚀 Kicking off all analysis tasks in parallel...")
 
-        # Submit Web Analysis task
-        web_analysis_future = executor.submit(
-            lambda: asyncio.run(_perform_web_analysis(company_name, agent_config))
-        ) if company_name else None
+    _timestamp("🚀 Kicking off all analysis tasks in parallel...")
 
-        # Submit PDF processing tasks
-        latest_text_future = executor.submit(_extract_text_from_pdf_buffer, latest_transcript_buffer) if latest_transcript_buffer else None
-        previous_text_future = executor.submit(_extract_text_from_pdf_buffer, previous_transcript_buffer) if previous_transcript_buffer else None
-        
-        # Collect web analysis results
-        if web_analysis_future:
-            print("🌐 Collecting web analysis results...")
-            results.update(web_analysis_future.result())
+    # Kick off Scuttlebutt + SEBI (independent, let them run in background)
+    scuttlebutt_future = None
+    sebi_future = None
+    if company_name:
+        scuttlebutt_future = asyncio.create_task(
+            asyncio.to_thread(_scuttlebutt_sync, company_name, agent_config)
+        )
+        sebi_future = asyncio.create_task(
+            asyncio.to_thread(_sebi_sync, company_name, agent_config)
+        )
 
-        # Wait for and process transcript results
-        latest_text = latest_text_future.result() if latest_text_future else None
-        if latest_text:
-            print("📝 Analyzing latest transcript...")
-            results["positives_and_concerns"] = _analyze_positives_and_concerns(latest_text, agent_config)
-            
-            previous_text = previous_text_future.result() if previous_text_future else None
-            if previous_text:
-                print("🔄 Performing QoQ comparison...")
-                results["qoq_comparison"] = _compare_transcripts(latest_text, previous_text, agent_config)
-        
+    # Kick off PDF extraction
+    latest_future = None
+    prev_future = None
+    if latest_transcript_buffer:
+        latest_future = asyncio.create_task(
+            asyncio.to_thread(_extract_text_from_pdf_buffer, latest_transcript_buffer)
+        )
+    if previous_transcript_buffer:
+        prev_future = asyncio.create_task(
+            asyncio.to_thread(_extract_text_from_pdf_buffer, previous_transcript_buffer)
+        )
+
+    # Wait for transcripts as soon as they are ready
+    latest_text = await latest_future if latest_future else None
+    previous_text = await prev_future if prev_future else None
+
+    # As soon as latest transcript is ready, analyze it
+    if latest_text:
+        _timestamp("📝 Analyzing latest transcript...")
+        results["positives_and_concerns"] = await asyncio.to_thread(
+            _analyze_positives_and_concerns, latest_text, agent_config
+        )
+
+        if previous_text:
+            _timestamp("🔄 Performing QoQ comparison...")
+            results["qoq_comparison"] = await asyncio.to_thread(
+                _compare_transcripts, latest_text, previous_text, agent_config
+            )
+
+    # Meanwhile, scuttlebutt and sebi keep running in background
+    if scuttlebutt_future:
+        results["scuttlebutt"] = await scuttlebutt_future
+    if sebi_future:
+        results["sebi_check"] = await sebi_future
+
     print("✅ Qualitative Analysis complete!\n")
     return results
+
+
+# Convenience sync wrapper
+def run_qualitative_analysis(company_name, latest_transcript_buffer, previous_transcript_buffer, agent_config):
+    return asyncio.run(run_qualitative_analysis_async(
+        company_name, latest_transcript_buffer, previous_transcript_buffer, agent_config
+    ))
