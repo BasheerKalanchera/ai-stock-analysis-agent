@@ -1,4 +1,26 @@
 import google.generativeai as genai
+import logging
+
+# --- CUSTOM LOGGER SETUP ---
+# 1. Get a custom logger
+logger = logging.getLogger('synthesis_agent')
+logger.setLevel(logging.INFO)
+
+# 2. Create a handler
+handler = logging.StreamHandler()
+
+# 3. Create a custom formatter and set it for the handler
+formatter = logging.Formatter('%(asctime)s - SYNTH - %(message)s')
+handler.setFormatter(formatter)
+
+# 4. Add the handler to the logger
+if not logger.handlers:
+    logger.addHandler(handler)
+
+# 5. Stop logger from propagating to the root logger
+logger.propagate = False
+# --- END CUSTOM LOGGER SETUP ---
+
 
 def generate_investment_summary(ticker: str, quantitative_analysis: str, qualitative_analysis: dict, agent_config: dict) -> str:
     """
@@ -9,7 +31,9 @@ def generate_investment_summary(ticker: str, quantitative_analysis: str, qualita
     model_name = agent_config.get("LITE_MODEL_NAME", "gemini-1.5-flash") # Use lite model for summary
 
     if not api_key:
-        return "Synthesis Agent Error: Google API Key is not configured."
+        msg = "Synthesis Agent Error: Google API Key is not configured."
+        logger.error(msg)
+        return msg
 
     # --- Existing logic for handling missing analysis ---
     if qualitative_analysis:
@@ -70,14 +94,14 @@ def generate_investment_summary(ticker: str, quantitative_analysis: str, qualita
     ```
     """
 
-    print("Synthesis Agent: Generating final investment summary...")
+    logger.info(f"Generating final investment summary for {ticker}...")
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(model_name)
         response = model.generate_content(prompt)
-        print("Synthesis Agent: Finished final analysis.")
+        logger.info(f"Finished final analysis for {ticker}.")
         return response.text
     except Exception as e:
-        error_msg = f"An error occurred during synthesis analysis: {e}"
-        print(error_msg)
+        error_msg = f"An error occurred during synthesis analysis for {ticker}: {e}"
+        logger.error(error_msg)
         return error_msg

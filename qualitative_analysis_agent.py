@@ -4,40 +4,61 @@ import asyncio
 import google.generativeai as genai
 from typing import Optional, Dict
 from functools import lru_cache
-from datetime import datetime
+import logging
+
+# --- CUSTOM LOGGER SETUP ---
+# 1. Get a custom logger
+logger = logging.getLogger('qualitative_agent')
+logger.setLevel(logging.INFO)
+
+# 2. Create a handler
+handler = logging.StreamHandler()
+
+# 3. Create a custom formatter and set it for the handler
+formatter = logging.Formatter('%(asctime)s - QUAL - %(message)s')
+handler.setFormatter(formatter)
+
+# 4. Add the handler to the logger
+if not logger.handlers:
+    logger.addHandler(handler)
+
+# 5. Stop logger from propagating to the root logger
+logger.propagate = False
+# --- END CUSTOM LOGGER SETUP ---
 
 # --- Core Functions ---
-def _timestamp(msg: str):
-    """Helper for timestamped logs"""
-    print(f"{datetime.now().strftime('%H:%M:%S')} | {msg}")
 
 def _extract_text_from_pdf_buffer(pdf_buffer: io.BytesIO | None) -> str:
     """Optimized PDF text extraction"""
-    _timestamp("BACKGROUND THREAD: STARTING PDF text extraction...")
+    logger.info("Starting PDF text extraction...")
     if not pdf_buffer:
         return ""
     try:
         with fitz.open(stream=pdf_buffer.getvalue(), filetype="pdf") as doc:
             full_text = "".join(page.get_text() for page in doc)
-        _timestamp("BACKGROUND THREAD: FINISHED PDF text extraction.")    
+        logger.info("Finished PDF text extraction.")
         return full_text
     except Exception as e:
-        print(f"Error reading PDF from buffer: {e}")
+        logger.error(f"Error reading PDF from buffer: {e}")
         return ""
 
 @lru_cache(maxsize=32)
 def _analyze_with_gemini(prompt: str, analysis_type: str, model_name: str, api_key: str) -> str:
     """Cached version of Gemini API calls that accepts an API key."""
     if not api_key:
-        return f"Analysis skipped for '{analysis_type}': Google API Key is not configured."
+        msg = f"Analysis skipped for '{analysis_type}': Google API Key is not configured."
+        logger.warning(msg)
+        return msg
     
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(model_name)
+        logger.info(f"Calling Gemini for '{analysis_type}' analysis...")
         response = model.generate_content(prompt)
-        _timestamp(f"BACKGROUND THREAD: Finished '{analysis_type}' analysis.")
+        logger.info(f"Finished '{analysis_type}' analysis.")
         return response.text
     except Exception as e:
+        logger.error(f"Could not generate '{analysis_type}' analysis. Error: {e}")
         return f"Could not generate '{analysis_type}' analysis. {str(e)}"
 
 def _compare_transcripts(latest_text: str, previous_text: str, agent_config: dict) -> str:
@@ -81,7 +102,7 @@ def _analyze_positives_and_concerns(transcript_text: str, agent_config: dict) ->
                                 agent_config.get("GOOGLE_API_KEY"))
 
 def _scuttlebutt_sync(company_name: str, agent_config: dict) -> str:
-    _timestamp("BACKGROUND THREAD: STARTING scuttlebutt analysis...")
+    logger.info("Starting scuttlebutt analysis...")
     prompt = f"""
     As a world-class financial analyst following Philip Fisher's "Scuttlebutt" method, conduct a deep investigation into the company: **{company_name}**.
     Your goal is to gather qualitative insights that are not typically found in financial statements. Search for and synthesize the most up-to-date information available as of **September 2025** from a wide range of sources including:
@@ -104,7 +125,7 @@ def _scuttlebutt_sync(company_name: str, agent_config: dict) -> str:
                                 agent_config.get("GOOGLE_API_KEY"))
 
 def _sebi_sync(company_name: str, agent_config: dict) -> str:
-    _timestamp("BACKGROUND THREAD: STARTING SEBI violations analysis...")
+    logger.info("Starting SEBI violations analysis...")
     prompt = f"""
     As a compliance officer, please conduct a thorough search for any publicly reported regulatory actions, penalties, or ongoing investigations by the Securities and Exchange Board of India (SEBI) involving the company: **{company_name}**.
     Search for information related to:
@@ -126,8 +147,7 @@ async def run_qualitative_analysis_async(
     previous_transcript_buffer: io.BytesIO | None,
     agent_config: dict
 ) -> Dict[str, Optional[str]]:
-    print("\n🔍 Starting Qualitative Analysis...")
-    print(f"📊 Analyzing {company_name}")
+    logger.info(f"--- Starting Qualitative Analysis for {company_name} ---")
 
     results = {
         "positives_and_concerns": None,
@@ -136,7 +156,7 @@ async def run_qualitative_analysis_async(
         "sebi_check": None
     }
 
-    _timestamp("🚀 Kicking off all analysis tasks in parallel...")
+    logger.info("Kicking off all analysis tasks in parallel...")
 
     # Kick off Scuttlebutt + SEBI (independent, let them run in background)
     scuttlebutt_future = None
@@ -167,13 +187,13 @@ async def run_qualitative_analysis_async(
 
     # As soon as latest transcript is ready, analyze it
     if latest_text:
-        _timestamp("📝 Analyzing latest transcript...")
+        logger.info("Analyzing latest transcript for positives and concerns...")
         results["positives_and_concerns"] = await asyncio.to_thread(
             _analyze_positives_and_concerns, latest_text, agent_config
         )
 
         if previous_text:
-            _timestamp("🔄 Performing QoQ comparison...")
+            logger.info("Performing QoQ comparison...")
             results["qoq_comparison"] = await asyncio.to_thread(
                 _compare_transcripts, latest_text, previous_text, agent_config
             )
@@ -184,7 +204,7 @@ async def run_qualitative_analysis_async(
     if sebi_future:
         results["sebi_check"] = await sebi_future
 
-    print("✅ Qualitative Analysis complete!\n")
+    logger.info(f"--- Finished Qualitative Analysis for {company_name} ---")
     return results
 
 
