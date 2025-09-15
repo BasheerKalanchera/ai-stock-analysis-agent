@@ -19,25 +19,40 @@ from report_generator import create_pdf_report
 st.set_page_config(page_title="AI Stock Analysis Crew", page_icon="🤖", layout="wide")
 load_dotenv() # Load .env file for local development
 
-# --- THE FIX: ROBUST SECRET HANDLING ---
-# This pattern correctly handles both local (.env) and cloud (st.secrets) environments.
+# --- CENTRALIZED SECRET & CONFIGURATION HANDLING ---
+agent_configs = {}
 try:
-    # This will succeed on Streamlit Cloud
-    SCREENER_EMAIL = st.secrets["SCREENER_EMAIL"]
-    SCREENER_PASSWORD = st.secrets["SCREENER_PASSWORD"]
-except st.errors.StreamlitAPIException as e:
-    # This will happen locally if secrets.toml doesn't exist
-    if "No secrets found" in str(e):
-        SCREENER_EMAIL = os.getenv("SCREENER_EMAIL")
-        SCREENER_PASSWORD = os.getenv("SCREENER_PASSWORD")
+    # This will succeed on Streamlit Cloud, setting IS_CLOUD_ENV to True
+    agent_configs = {
+        "SCREENER_EMAIL": st.secrets["SCREENER_EMAIL"],
+        "SCREENER_PASSWORD": st.secrets["SCREENER_PASSWORD"],
+        "GOOGLE_API_KEY": st.secrets["GOOGLE_API_KEY"],
+        "LITE_MODEL_NAME": st.secrets.get("LITE_MODEL_NAME", "gemini-1.5-flash"),
+        "HEAVY_MODEL_NAME": st.secrets.get("HEAVY_MODEL_NAME", "gemini-1.5-pro"),
+        "IS_CLOUD_ENV": True # Explicitly set environment flag
+    }
+except (st.errors.StreamlitAPIException, KeyError) as e:
+    # This will happen locally if secrets.toml doesn't exist or is incomplete
+    if "No secrets found" in str(e) or isinstance(e, KeyError):
+        agent_configs = {
+            "SCREENER_EMAIL": os.getenv("SCREENER_EMAIL"),
+            "SCREENER_PASSWORD": os.getenv("SCREENER_PASSWORD"),
+            "GOOGLE_API_KEY": os.getenv("GOOGLE_API_KEY"),
+            "LITE_MODEL_NAME": os.getenv("LITE_MODEL_NAME", "gemini-1.5-flash"),
+            "HEAVY_MODEL_NAME": os.getenv("HEAVY_MODEL_NAME", "gemini-1.5-pro"),
+            "IS_CLOUD_ENV": False # Explicitly set environment flag
+        }
     else:
-        raise e # Reraise other potential errors
+        raise e
 
-# Check if secrets were loaded successfully
-if not SCREENER_EMAIL or not SCREENER_PASSWORD:
-    st.error("Screener credentials not found. Please set them in your .env file locally or in st.secrets for cloud deployment.")
+# Validate that essential secrets were loaded
+essential_keys = ["SCREENER_EMAIL", "SCREENER_PASSWORD", "GOOGLE_API_KEY"]
+missing_keys = [key for key in essential_keys if not agent_configs.get(key)]
+
+if missing_keys:
+    st.error(f"The following secrets are missing: {', '.join(missing_keys)}. Please set them in your .env file locally or in st.secrets for cloud deployment.")
     st.stop()
-# --- END OF FIX ---
+# --- END OF CONFIGURATION HANDLING ---
 
 
 # --- Define Graph State ---
@@ -56,19 +71,21 @@ class StockAnalysisState(TypedDict):
     log_file_content: Annotated[str, lambda x, y: x + y]
     pdf_report_bytes: bytes | None
     is_consolidated: bool | None
+    agent_config: Dict[str, Any] # Holds all secrets and configs
 
 # --- Agent Nodes ---
 def fetch_data_node(state: StockAnalysisState):
     st.toast("Executing Agent 1: Data Fetcher...")
     ticker = state['ticker']
     is_consolidated = state['is_consolidated']
+    config = state['agent_config'] # Get config from state
     
     log_content_accumulator = state.get('log_file_content', "")
 
+    # Pass the entire config object
     company_name, file_data = download_financial_data(
         ticker,
-        SCREENER_EMAIL,
-        SCREENER_PASSWORD,
+        config,
         is_consolidated
     )
     
@@ -92,12 +109,13 @@ def quantitative_analysis_node(state: StockAnalysisState):
     st.toast("Executing Agent 2: Quantitative Analyst...")
     excel_data = state['file_data'].get('excel')
     log_content_accumulator = state['log_file_content']
+    config = state['agent_config']
     
     if not excel_data:
         text_results = "Quantitative analysis skipped: Excel data not found."
         structured_results = [{"type": "text", "content": text_results}]
     else:
-        structured_results = analyze_financials(excel_data, state['ticker'])
+        structured_results = analyze_financials(excel_data, state['ticker'], config)
         text_results = "\n".join([item['content'] for item in structured_results if item['type'] == 'text'])
 
     log_content_accumulator += f"## AGENT 2: QUANTITATIVE ANALYSIS\n\n{text_results}\n\n---\n\n"
@@ -112,11 +130,13 @@ def qualitative_analysis_node(state: StockAnalysisState):
     st.toast("Executing Agent 3: Qualitative Analyst...")
     company = state['company_name'] or state['ticker']
     log_content_accumulator = state['log_file_content']
+    config = state['agent_config']
     
     results = run_qualitative_analysis(
         company, 
         state['file_data'].get("latest_transcript"),
-        state['file_data'].get("previous_transcript")
+        state['file_data'].get("previous_transcript"),
+        config
     )
     
     log_entry = "## AGENT 3: QUALITATIVE ANALYSIS\n\n"
@@ -130,13 +150,15 @@ def qualitative_analysis_node(state: StockAnalysisState):
 def synthesis_node(state: StockAnalysisState):
     st.toast("Executing Agent 4: Synthesis Agent...")
     log_content_accumulator = state['log_file_content']
+    config = state['agent_config']
     
     quant_text = state.get('quant_text_for_synthesis', "Quantitative analysis was not performed.")
     
     report = generate_investment_summary(
         state['company_name'] or state['ticker'],
         quant_text,
-        state['qualitative_results']
+        state['qualitative_results'],
+        config
     )
     
     log_content_accumulator += f"## AGENT 4: FINAL SYNTHESIS REPORT\n\n{report}\n\n---\n\n"
@@ -147,17 +169,12 @@ def generate_report_node(state: StockAnalysisState):
     
     pdf_buffer = io.BytesIO()
     
-    quant_results = state.get('quant_results_structured', [])
-    company_name = state.get('company_name')
-    qual_results = state.get('qualitative_results', {})
-    final_report = state.get('final_report', "Report could not be fully generated.")
-
     create_pdf_report(
         ticker=state['ticker'],
-        company_name=company_name,
-        quant_results=quant_results,
-        qual_results=qual_results,
-        final_report=final_report,
+        company_name=state.get('company_name'),
+        quant_results=state.get('quant_results_structured', []),
+        qual_results=state.get('qualitative_results', {}),
+        final_report=state.get('final_report', "Report could not be fully generated."),
         file_path=pdf_buffer
     )
     pdf_buffer.seek(0)
@@ -206,10 +223,12 @@ if st.sidebar.button("🚀 Run Full Analysis", type="primary"):
         st.session_state.final_state = None
         
         is_consolidated = (data_type_choice == "Consolidated")
+        
         inputs = {
             "ticker": st.session_state.ticker,
             "log_file_content": f"# Analysis Log for {st.session_state.ticker}\n\n",
-            "is_consolidated": is_consolidated
+            "is_consolidated": is_consolidated,
+            "agent_config": agent_configs
         }
         
         with st.status("Running Analysis Crew...", expanded=True) as status:
@@ -244,7 +263,6 @@ if st.session_state.final_state:
     final_state = st.session_state.final_state
     st.header(f"Analysis Results for {final_state.get('company_name') or final_state.get('ticker')}", divider="rainbow")
 
-    
     st.sidebar.markdown("---")
     st.sidebar.subheader("Download Report")
     
@@ -257,9 +275,7 @@ if st.session_state.final_state:
             file_name=report_filename,
             mime="application/pdf"
         )
-    else:
-        st.sidebar.error("PDF Report not generated.")
-
+    
     if final_state.get('final_report'):
         st.subheader("📈📝 Comprehensive Investment Summary")
         st.markdown(final_state['final_report'], unsafe_allow_html=True)
@@ -277,4 +293,3 @@ if st.session_state.final_state:
                 st.markdown(f"**{key.replace('_', ' ').title()}:** {value}")
 else:
     st.info("Enter a stock ticker in the sidebar and click 'Run Full Analysis' to begin.")
-

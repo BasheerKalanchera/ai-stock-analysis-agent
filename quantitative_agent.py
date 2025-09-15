@@ -1,20 +1,37 @@
 import pandas as pd
-import os
 import warnings
-import sys
 import re
 import google.generativeai as genai
-from dotenv import load_dotenv
 import matplotlib.pyplot as plt
 import datetime
 import io
-from typing import List, Dict, Any  # Add this import
+import logging
+from typing import List, Dict, Any
+
+# --- CUSTOM LOGGER SETUP ---
+# 1. Get a custom logger
+logger = logging.getLogger('quantitative_agent')
+logger.setLevel(logging.INFO)
+
+# 2. Create a handler
+handler = logging.StreamHandler()
+
+# 3. Create a custom formatter and set it for the handler
+formatter = logging.Formatter('%(asctime)s - QUANT - %(message)s')
+handler.setFormatter(formatter)
+
+# 4. Add the handler to the logger
+if not logger.handlers:
+    logger.addHandler(handler)
+
+# 5. Stop logger from propagating to the root logger
+logger.propagate = False
+# --- END CUSTOM LOGGER SETUP ---
+
 
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
-load_dotenv()
 
 # --- CHARTING FUNCTIONS ---
-
 def format_year_ticks(ax):
     """Helper function to format x-axis ticks to show only years"""
     labels = [label.get_text()[:4] for label in ax.get_xticklabels()]
@@ -39,10 +56,10 @@ def create_sales_profit_chart(df, ticker):
         plt.savefig(buf, format='png')
         plt.close()
         buf.seek(0)
-        print(f"Sales vs Net Profit Chart for {ticker} created in memory.")
+        logger.info(f"Sales vs Net Profit Chart for {ticker} created in memory.")
         return buf
     except Exception as e:
-        print(f"Could not generate Sales/Profit chart: {e}")
+        logger.error(f"Could not generate Sales/Profit chart for {ticker}: {e}")
         return None
 
 def create_borrowings_chart(df, ticker):
@@ -63,10 +80,10 @@ def create_borrowings_chart(df, ticker):
         plt.savefig(buf, format='png')
         plt.close()
         buf.seek(0)
-        print(f"Borrowings Chart for {ticker} created in memory.")
+        logger.info(f"Borrowings Chart for {ticker} created in memory.")
         return buf
     except Exception as e:
-        print(f"Could not generate Borrowings chart: {e}")
+        logger.error(f"Could not generate Borrowings chart for {ticker}: {e}")
         return None
 
 def create_cashflow_vs_profit_chart(cashflow_df, pnl_df, ticker):
@@ -92,10 +109,10 @@ def create_cashflow_vs_profit_chart(cashflow_df, pnl_df, ticker):
         plt.savefig(buf, format='png')
         plt.close()
         buf.seek(0)
-        print(f"Cashflow vs Net Profit Chart for {ticker} created in memory.")
+        logger.info(f"Cashflow vs Net Profit Chart for {ticker} created in memory.")
         return buf
     except Exception as e:
-        print(f"Could not generate Cashflow vs Profit chart: {e}")
+        logger.error(f"Could not generate Cashflow vs Profit chart for {ticker}: {e}")
         return None
     
 def create_opm_chart(opm_df: pd.DataFrame, ticker: str):
@@ -118,10 +135,10 @@ def create_opm_chart(opm_df: pd.DataFrame, ticker: str):
         plt.savefig(buf, format='png')
         plt.close()
         buf.seek(0)
-        print(f"OPM Chart for {ticker} created in memory.")
+        logger.info(f"OPM Chart for {ticker} created in memory.")
         return buf
     except Exception as e:
-        print(f"Could not generate OPM chart from DataFrame: {e}")
+        logger.error(f"Could not generate OPM chart from DataFrame for {ticker}: {e}")
         return None
 
 def create_reserves_chart(df, ticker):
@@ -142,10 +159,10 @@ def create_reserves_chart(df, ticker):
         plt.savefig(buf, format='png')
         plt.close()
         buf.seek(0)
-        print(f"Reserves Chart for {ticker} created in memory.")
+        logger.info(f"Reserves Chart for {ticker} created in memory.")
         return buf
     except Exception as e:
-        print(f"Could not generate Reserves chart: {e}")
+        logger.error(f"Could not generate Reserves chart for {ticker}: {e}")
         return None
 
 def create_cfo_chart(df, ticker):
@@ -166,34 +183,27 @@ def create_cfo_chart(df, ticker):
         plt.savefig(buf, format='png')
         plt.close()
         buf.seek(0)
-        print(f"CFO Chart for {ticker} created in memory.")
+        logger.info(f"CFO Chart for {ticker} created in memory.")
         return buf
     except Exception as e:
-        print(f"Could not generate CFO chart: {e}")
+        logger.error(f"Could not generate CFO chart for {ticker}: {e}")
         return None
 
 # --- HEADER CLEANING HELPER ---
 def clean_headers(df: pd.DataFrame) -> pd.DataFrame:
     """Drop bad headers, duplicate columns, and normalize names to string."""
-    # Drop columns where header is NaN
     df = df.loc[:, df.columns.notna()]
-    # Drop columns literally named 'nan' (string)
     df = df.loc[:, df.columns.astype(str).str.lower() != 'nan']
-    # Drop columns where all values are NaN
     df = df.dropna(axis=1, how='all')
-    # Drop duplicate headers
     df = df.loc[:, ~df.columns.duplicated(keep='first')]
-    # Normalize column names to string
     df.columns = df.columns.map(str)
     return df
-# --- END HEADER CLEANING ---
 
 # --- DATA PARSING ---
 def read_and_parse_data_sheet(excel_buffer: io.BytesIO):
     """Parse financial data from Excel buffer."""
     try:
         df = pd.read_excel(excel_buffer, sheet_name='Data Sheet', header=None, engine='openpyxl')
-        # Reset buffer position for subsequent reads
         excel_buffer.seek(0)
         report_date_indices = df[df.iloc[:, 0].astype(str).str.contains('Report Date', na=False)].index
         annual_headers_row_index = report_date_indices[0]
@@ -225,13 +235,12 @@ def read_and_parse_data_sheet(excel_buffer: io.BytesIO):
         return pnl, bs, cf
 
     except Exception as e:
-        print(f"Error parsing 'Data Sheet': {e}"); return None, None, None
+        logger.error(f"Error parsing 'Data Sheet': {e}", exc_info=True); return None, None, None
 
 def calculate_opm_from_data_sheet(excel_buffer: io.BytesIO):
     """Calculate OPM from Excel buffer."""
     try:
         df = pd.read_excel(excel_buffer, sheet_name='Data Sheet', header=None, engine='openpyxl')
-        # Reset buffer position for subsequent reads
         excel_buffer.seek(0)
         
         header_row_index = df[df[0] == 'Report Date'].index[0]
@@ -248,51 +257,38 @@ def calculate_opm_from_data_sheet(excel_buffer: io.BytesIO):
         
         pnl_data = pnl_data.apply(pd.to_numeric, errors='coerce').fillna(0)
 
-        opex_group_items = [
-            'Raw Material Cost', 
-            'Power and Fuel', 
-            'Other Mfr. Exp',
-            'Employee Cost', 
-            'Selling and admin',
-            'Other Expenses'
-        ]
-        
+        opex_group_items = ['Raw Material Cost', 'Power and Fuel', 'Other Mfr. Exp', 'Employee Cost', 'Selling and admin', 'Other Expenses']
         opex_group_sum = pnl_data.loc[pnl_data.index.intersection(opex_group_items)].sum(axis=0)
-        
         inventory_series = pnl_data.loc['Change in Inventory'] if 'Change in Inventory' in pnl_data.index else pd.Series(0, index=pnl_data.columns)
-        
         total_expenses = opex_group_sum - inventory_series
         sales_series = pnl_data.loc['Sales']
-        
         operating_profit = sales_series - total_expenses
         opm_percent = (operating_profit / sales_series) * 100
 
-        opm_df = pd.DataFrame({
-            'Operating Profit (Cr)': operating_profit,
-            'OPM %': opm_percent.round(2)
-        }).T
-        
+        opm_df = pd.DataFrame({'Operating Profit (Cr)': operating_profit, 'OPM %': opm_percent.round(2)}).T
         opm_df.columns = [col.strftime('%Y-%m-%d') if isinstance(col, datetime.datetime) else col for col in opm_df.columns]
         opm_df.rename(columns={col: col.strftime('%Y-%m-%d') if isinstance(col, datetime.datetime) else col for col in opm_df.columns}, inplace=True)
-        
         opm_df = clean_headers(opm_df)
-
         return opm_df
 
     except Exception as e:
-        print(f"Could not calculate OPM data from 'Data Sheet': {e}")
+        logger.error(f"Could not calculate OPM data from 'Data Sheet': {e}", exc_info=True)
         return None
 
 # --- LLM ANALYSIS FUNCTION ---
-def get_analysis_from_gemini(pnl_df, bs_df, cf_df, ticker, opm_table_string):
+def get_analysis_from_gemini(pnl_df, bs_df, cf_df, ticker, opm_table_string, agent_config: dict):
     """Sends financial data to Gemini and gets back a quantitative analysis report."""
+    api_key = agent_config.get("GOOGLE_API_KEY")
+    model_name = agent_config.get("LITE_MODEL_NAME", "gemini-1.5-flash")
+
+    if not api_key:
+        return "ERROR: Google API Key not configured."
+
     try:
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if not api_key: return "ERROR: Google API Key not configured."
         genai.configure(api_key=api_key)
         
         generation_config = {"temperature": 0.2, "top_p": 1, "top_k": 1, "max_output_tokens": 8192}
-        model = genai.GenerativeModel(model_name="gemini-2.0-flash", generation_config=generation_config)
+        model = genai.GenerativeModel(model_name=model_name, generation_config=generation_config)
 
         pd.set_option('display.max_rows', None)
         pd.set_option('display.max_columns', None)
@@ -343,12 +339,12 @@ def get_analysis_from_gemini(pnl_df, bs_df, cf_df, ticker, opm_table_string):
         Provide a professional, data-driven analysis. Do not include investment advice.
         """
         
-        print("--- Calling Gemini for Quantitative Analysis ---")
+        logger.info(f"--- Calling Gemini for Quantitative Analysis of {ticker} ---")
         response = model.generate_content(prompt)
         return response.text
 
     except Exception as e:
-        print(f"An error occurred while calling the Gemini API: {e}")
+        logger.error(f"An error occurred while calling the Gemini API for {ticker}: {e}", exc_info=True)
         return f"ERROR: Failed to get analysis from Gemini. {e}"
 
 
@@ -358,15 +354,15 @@ def safe_extract_section(text, start_marker, end_marker=None):
         match = re.search(pattern, text, re.DOTALL)
         return match.group(1).strip() if match else ""
     except re.error as e:
-        print(f"Regex error for marker '{start_marker}': {e}"); return ""
+        logger.error(f"Regex error for marker '{start_marker}': {e}"); return ""
 
 # --- MAIN ANALYSIS FUNCTION ---
-def analyze_financials(excel_buffer: io.BytesIO, ticker: str) -> List[Dict[str, Any]]:
+def analyze_financials(excel_buffer: io.BytesIO, ticker: str, agent_config: dict) -> List[Dict[str, Any]]:
     """
     Analyzes financial data from Excel file stored in memory.
-    Now accepts Excel data as BytesIO object instead of file path.
+    Accepts an agent_config dictionary for API key and model names.
     """
-    print("--- Starting Quantitative Analysis ---")
+    logger.info(f"--- Starting Quantitative Analysis for {ticker} ---")
     try:
         # Parse Excel data from buffer
         annual_pnl_df, balance_sheet_df, cash_flow_df = read_and_parse_data_sheet(excel_buffer)
@@ -375,14 +371,11 @@ def analyze_financials(excel_buffer: io.BytesIO, ticker: str) -> List[Dict[str, 
 
         # Calculate OPM using the same buffer
         opm_df = calculate_opm_from_data_sheet(excel_buffer)
-        if opm_df is not None:
-            opm_table_string = opm_df.to_markdown()
-        else:
-            opm_table_string = "OPM data could not be extracted from the 'Data Sheet'."
+        opm_table_string = opm_df.to_markdown() if opm_df is not None else "OPM data could not be extracted from the 'Data Sheet'."
             
-        # Get analysis from Gemini
+        # Get analysis from Gemini, passing the config dictionary
         analysis_result_text = get_analysis_from_gemini(
-            annual_pnl_df, balance_sheet_df, cash_flow_df, ticker, opm_table_string
+            annual_pnl_df, balance_sheet_df, cash_flow_df, ticker, opm_table_string, agent_config
         )
         if "ERROR:" in analysis_result_text: 
             return [{"type": "text", "content": analysis_result_text}]
@@ -397,7 +390,7 @@ def analyze_financials(excel_buffer: io.BytesIO, ticker: str) -> List[Dict[str, 
         
         report_content = []
         
-        # Defining markers for splitting, updated for bolding and no markdown
+        # Defining markers for splitting
         markers = {
             "rev_profit": "1. Revenue and Profitability Analysis",
             "balance_sheet": "2. Balance Sheet Analysis",
@@ -410,109 +403,66 @@ def analyze_financials(excel_buffer: io.BytesIO, ticker: str) -> List[Dict[str, 
         text_cash_flow = safe_extract_section(analysis_result_text, "### " + markers['cash_flow'], "### " + markers['summary'])
         text_summary = safe_extract_section(analysis_result_text, "### " + markers['summary'])
         
-        # Function to remove the first line (duplicate header)
         def remove_first_line(text):
             return text.split('\n', 1)[1] if '\n' in text else text
 
-        # Handling Revenue and Profitability Analysis
+        # Report generation logic
         if text_rev_profit:
             opm_marker = "**Operating Profit Margin (OPM) Trend:**"
             text_to_process = remove_first_line(text_rev_profit)
             if "Operating Profit Margin (OPM) Trend:" in text_to_process:
                 part1, part2 = text_to_process.split("Operating Profit Margin (OPM) Trend:", 1)
-                
                 report_content.append({"type": "text", "content": "**" + markers['rev_profit'] + "**"})
-                if chart1_sales_profit:
-                    report_content.append({"type": "chart", "content": chart1_sales_profit})
+                if chart1_sales_profit: report_content.append({"type": "chart", "content": chart1_sales_profit})
                 report_content.append({"type": "text", "content": part1.strip()})
-                
                 report_content.append({"type": "text", "content": opm_marker})
-                if chart4_opm:
-                    report_content.append({"type": "chart", "content": chart4_opm})
+                if chart4_opm: report_content.append({"type": "chart", "content": chart4_opm})
                 report_content.append({"type": "text", "content": part2.strip()})
             else:
                 report_content.append({"type": "text", "content": "**" + markers['rev_profit'] + "**"})
-                if chart1_sales_profit:
-                    report_content.append({"type": "chart", "content": chart1_sales_profit})
+                if chart1_sales_profit: report_content.append({"type": "chart", "content": chart1_sales_profit})
                 report_content.append({"type": "text", "content": text_to_process})
 
-        # Handling Balance Sheet Analysis
         if text_balance_sheet:
             reserves_marker = "**Trend in 'Reserves':**"
             text_to_process = remove_first_line(text_balance_sheet)
             if "Trend in 'Reserves':" in text_to_process:
                 part1, part2 = text_to_process.split("Trend in 'Reserves':", 1)
-                
                 report_content.append({"type": "text", "content": "**" + markers['balance_sheet'] + "**"})
-                if chart2_borrowings:
-                    report_content.append({"type": "chart", "content": chart2_borrowings})
+                if chart2_borrowings: report_content.append({"type": "chart", "content": chart2_borrowings})
                 report_content.append({"type": "text", "content": part1.strip()})
-
                 report_content.append({"type": "text", "content": reserves_marker})
-                if chart5_reserves:
-                    report_content.append({"type": "chart", "content": chart5_reserves})
+                if chart5_reserves: report_content.append({"type": "chart", "content": chart5_reserves})
                 report_content.append({"type": "text", "content": part2.strip()})
             else:
                 report_content.append({"type": "text", "content": "**" + markers['balance_sheet'] + "**"})
-                if chart2_borrowings:
-                    report_content.append({"type": "chart", "content": chart2_borrowings})
+                if chart2_borrowings: report_content.append({"type": "chart", "content": chart2_borrowings})
                 report_content.append({"type": "text", "content": text_to_process})
 
-
-        # Handling Cash Flow Analysis
         if text_cash_flow:
             cfo_vs_np_marker = "**Comparison of 'Cash from Operating Activity' to 'Net Profit' (Annual):**"
             cumulative_marker = "**Cumulative 'Cash from Operating Activity' vs. 'Net Profit':**"
             text_to_process = remove_first_line(text_cash_flow)
-            
             report_content.append({"type": "text", "content": "**" + markers['cash_flow'] + "**"})
-            if chart6_cfo:
-                report_content.append({"type": "chart", "content": chart6_cfo})
-            
+            if chart6_cfo: report_content.append({"type": "chart", "content": chart6_cfo})
             if "Comparison of 'Cash from Operating Activity' to 'Net Profit' (Annual):" in text_to_process:
                 part1, remainder = text_to_process.split("Comparison of 'Cash from Operating Activity' to 'Net Profit' (Annual):", 1)
                 report_content.append({"type": "text", "content": part1.strip()})
-                
                 report_content.append({"type": "text", "content": cfo_vs_np_marker})
-                if chart3_cf_vs_profit:
-                    report_content.append({"type": "chart", "content": chart3_cf_vs_profit})
-
+                if chart3_cf_vs_profit: report_content.append({"type": "chart", "content": chart3_cf_vs_profit})
                 if "Cumulative 'Cash from Operating Activity' vs. 'Net Profit':" in remainder:
                     part2, part3 = remainder.split("Cumulative 'Cash from Operating Activity' vs. 'Net Profit':", 1)
                     report_content.append({"type": "text", "content": part2.strip()})
                     report_content.append({"type": "text", "content": cumulative_marker})
                     report_content.append({"type": "text", "content": part3.strip()})
-                else:
-                    report_content.append({"type": "text", "content": remainder.strip()})
-            else:
-                report_content.append({"type": "text", "content": text_to_process})
+                else: report_content.append({"type": "text", "content": remainder.strip()})
+            else: report_content.append({"type": "text", "content": text_to_process})
         
-        # Original logic for other sections remains unchanged
         if text_summary: report_content.append({"type": "text", "content": text_summary})
         if not report_content: return [{"type": "text", "content": analysis_result_text}]
-        print("--- Finished Quantitative Analysis ---")
+        logger.info(f"--- Finished Quantitative Analysis for {ticker} ---")
         return report_content
         
     except Exception as e:
+        logger.error(f"An unexpected error in quantitative_agent for {ticker}: {e}", exc_info=True)
         return [{"type": "text", "content": f"An unexpected error in quantitative_agent: {e.__class__.__name__} {e}"}]
-
-#if __name__ == '__main__':
-#   Test with sample data
-# TICKER = "JASH"
-# try:
-#     # Create a test buffer directly instead of reading from file
-#     test_buffer = io.BytesIO()
-#     # You could either:
-#     # 1. Read from a test file in a test directory
-#     # 2. Create a small test DataFrame and save it to the buffer
-#     # For now, keeping file read for testing
-#     with open(f"downloads/{TICKER}.xlsx", 'rb') as f:
-#         test_buffer.write(f.read())
-#     test_buffer.seek(0)  # Reset buffer position
-    
-#     final_content = analyze_financials(test_buffer, TICKER)
-#     import json
-#     print("\n--- STRUCTURED OUTPUT ---")
-#     print(json.dumps(final_content, indent=2))
-# except Exception as e:
-#     print(f"Error during testing: {e}")

@@ -18,8 +18,12 @@ __pycache__/
 logs/
 reports/
 
+# Ignore generated image files
+*.png
+
+# Ignore the entire VS Code folder
+.vscode/
+
 # Ignore Streamlit secrets and other sensitive files
 .streamlit/secrets.toml
 
-# Ignore .vscode
- .vscode/
