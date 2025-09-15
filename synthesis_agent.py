@@ -1,31 +1,17 @@
-import os
 import google.generativeai as genai
-from dotenv import load_dotenv
 
-# --- Load Environment Variables ---
-load_dotenv()
-
-# --- Google API Configuration ---
-API_KEY_CONFIGURED = False
-try:
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        raise ValueError("GOOGLE_API_KEY not found in .env file.")
-    genai.configure(api_key=api_key)
-    print("Synthesis Agent: Google API Key configured successfully.")
-    API_KEY_CONFIGURED = True
-except (ValueError, Exception) as e:
-    print(f"Synthesis Agent Error: Could not configure Google API Key. {e}")
-
-def generate_investment_summary(ticker: str, quantitative_analysis: str, qualitative_analysis: dict) -> str:
+def generate_investment_summary(ticker: str, quantitative_analysis: str, qualitative_analysis: dict, agent_config: dict) -> str:
     """
     Generates a final, comprehensive investment summary using the Gemini model.
+    Accepts an agent_config dictionary for API key and model names.
     """
-    if not API_KEY_CONFIGURED:
+    api_key = agent_config.get("GOOGLE_API_KEY")
+    model_name = agent_config.get("LITE_MODEL_NAME", "gemini-1.5-flash") # Use lite model for summary
+
+    if not api_key:
         return "Synthesis Agent Error: Google API Key is not configured."
 
-    # --- KEY CHANGE START ---
-    # Check if qualitative_analysis is None and provide a default message if it is.
+    # --- Existing logic for handling missing analysis ---
     if qualitative_analysis:
         qualitative_summary = f"""
         - Positives & Concerns (Latest Quarter): {qualitative_analysis.get('positives_and_concerns', 'N/A')}
@@ -36,11 +22,9 @@ def generate_investment_summary(ticker: str, quantitative_analysis: str, qualita
     else:
         qualitative_summary = "Qualitative analysis was not performed or failed."
     
-    # Also handle the case where quantitative_analysis might be None
     if not quantitative_analysis:
         quantitative_analysis = "Quantitative analysis was not performed or failed."
-    # --- KEY CHANGE END ---
-
+    # --- End of existing logic ---
 
     prompt = f"""
     You are a senior investment analyst at a top-tier hedge fund. Your task is to synthesize the provided quantitative and qualitative analyses for the company with ticker **{ticker}** into a single, comprehensive, and actionable investment summary.
@@ -88,7 +72,8 @@ def generate_investment_summary(ticker: str, quantitative_analysis: str, qualita
 
     print("Synthesis Agent: Generating final investment summary...")
     try:
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name)
         response = model.generate_content(prompt)
         print("Synthesis Agent: Finished final analysis.")
         return response.text

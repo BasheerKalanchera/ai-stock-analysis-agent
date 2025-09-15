@@ -1,13 +1,10 @@
-# Screener_Download.py
 import io
 import os
 import shutil
 import time
 from typing import Dict, Optional, Tuple
 import logging
-import streamlit as st # <-- ADDED IMPORT
 
-from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.chrome.service import Service
@@ -21,7 +18,6 @@ from webdriver_manager.chrome import ChromeDriverManager
 # --- LOGGING CONFIGURATION ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-
 def wait_for_new_file(download_path: str, files_before: list, timeout: int = 60) -> str | None:
     """Waits for a new file to appear in the download directory."""
     start_time = time.time()
@@ -34,18 +30,21 @@ def wait_for_new_file(download_path: str, files_before: list, timeout: int = 60)
         time.sleep(1)
     return None
 
-
 def download_financial_data(
     ticker: str,
-    email: str,
-    password: str,
+    config: dict, # Accept the config object
     is_consolidated: bool = False
 ) -> Tuple[Optional[str], Dict[str, io.BytesIO]]:
     """
     Downloads financial data and returns it in memory.
-    This function is environment-aware and works both locally and in Streamlit Cloud.
+    This function is environment-aware via the passed config object.
     Returns: Tuple of (company_name, dict of file buffers)
     """
+    # Get credentials and env flag from config
+    email = config["SCREENER_EMAIL"]
+    password = config["SCREENER_PASSWORD"]
+    is_cloud_env = config.get("IS_CLOUD_ENV", False)
+
     logging.info("Starting financial data download process...")
     chrome_options = webdriver.ChromeOptions()
     
@@ -64,10 +63,9 @@ def download_financial_data(
     file_buffers = {}
 
     try:
-        # --- THE FIX: A MORE ROBUST ENVIRONMENT CHECK ---
-        # Check if Streamlit secrets are available, which only happens in the cloud.
-        if hasattr(st, 'secrets') and st.secrets.get("SCREENER_EMAIL"):
-            logging.info("Running in Streamlit Cloud (detected via st.secrets). Initializing Chromium Driver...")
+        # A cleaner, config-driven environment check
+        if is_cloud_env:
+            logging.info("Running in Streamlit Cloud (detected via config). Initializing Chromium Driver...")
             chrome_options.add_argument("--headless")
             chrome_options.add_argument("--no-sandbox")
             chrome_options.add_argument("--disable-dev-shm-usage")
@@ -85,14 +83,13 @@ def download_financial_data(
                 return None, {}
 
         else:
-            logging.info("Running locally. Initializing Chrome Driver (headless)...")
+            logging.info("Running locally (detected via config). Initializing Chrome Driver (headless)...")
             chrome_options.add_argument("--headless")
             chrome_options.add_argument("--window-size=1920,1080")
             chrome_options.add_argument("--log-level=3")
             chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
             service = Service(executable_path=ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=chrome_options)
-        # --- END DYNAMIC INITIALIZATION ---
 
         wait = WebDriverWait(driver, 20)
 
@@ -176,4 +173,3 @@ def download_financial_data(
         logging.info("\nBrowser closed and temp files cleaned up.")
 
     return company_name, file_buffers
-
