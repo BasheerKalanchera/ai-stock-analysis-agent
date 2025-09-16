@@ -5,11 +5,33 @@ import google.generativeai as genai
 import matplotlib.pyplot as plt
 import datetime
 import io
+import logging
 from typing import List, Dict, Any
+
+# --- CUSTOM LOGGER SETUP ---
+# 1. Get a custom logger
+logger = logging.getLogger('quantitative_agent')
+logger.setLevel(logging.INFO)
+
+# 2. Create a handler
+handler = logging.StreamHandler()
+
+# 3. Create a custom formatter and set it for the handler
+formatter = logging.Formatter(f'%(asctime)s - 🟢 QUANT - %(message)s')
+handler.setFormatter(formatter)
+
+# 4. Add the handler to the logger
+if not logger.handlers:
+    logger.addHandler(handler)
+
+# 5. Stop logger from propagating to the root logger
+logger.propagate = False
+# --- END CUSTOM LOGGER SETUP ---
+
 
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
-# --- CHARTING FUNCTIONS (No changes needed) ---
+# --- CHARTING FUNCTIONS ---
 def format_year_ticks(ax):
     """Helper function to format x-axis ticks to show only years"""
     labels = [label.get_text()[:4] for label in ax.get_xticklabels()]
@@ -34,10 +56,10 @@ def create_sales_profit_chart(df, ticker):
         plt.savefig(buf, format='png')
         plt.close()
         buf.seek(0)
-        print(f"Sales vs Net Profit Chart for {ticker} created in memory.")
+        logger.info(f"Sales vs Net Profit Chart for {ticker} created in memory.")
         return buf
     except Exception as e:
-        print(f"Could not generate Sales/Profit chart: {e}")
+        logger.error(f"Could not generate Sales/Profit chart for {ticker}: {e}")
         return None
 
 def create_borrowings_chart(df, ticker):
@@ -58,10 +80,10 @@ def create_borrowings_chart(df, ticker):
         plt.savefig(buf, format='png')
         plt.close()
         buf.seek(0)
-        print(f"Borrowings Chart for {ticker} created in memory.")
+        logger.info(f"Borrowings Chart for {ticker} created in memory.")
         return buf
     except Exception as e:
-        print(f"Could not generate Borrowings chart: {e}")
+        logger.error(f"Could not generate Borrowings chart for {ticker}: {e}")
         return None
 
 def create_cashflow_vs_profit_chart(cashflow_df, pnl_df, ticker):
@@ -87,10 +109,10 @@ def create_cashflow_vs_profit_chart(cashflow_df, pnl_df, ticker):
         plt.savefig(buf, format='png')
         plt.close()
         buf.seek(0)
-        print(f"Cashflow vs Net Profit Chart for {ticker} created in memory.")
+        logger.info(f"Cashflow vs Net Profit Chart for {ticker} created in memory.")
         return buf
     except Exception as e:
-        print(f"Could not generate Cashflow vs Profit chart: {e}")
+        logger.error(f"Could not generate Cashflow vs Profit chart for {ticker}: {e}")
         return None
     
 def create_opm_chart(opm_df: pd.DataFrame, ticker: str):
@@ -113,10 +135,10 @@ def create_opm_chart(opm_df: pd.DataFrame, ticker: str):
         plt.savefig(buf, format='png')
         plt.close()
         buf.seek(0)
-        print(f"OPM Chart for {ticker} created in memory.")
+        logger.info(f"OPM Chart for {ticker} created in memory.")
         return buf
     except Exception as e:
-        print(f"Could not generate OPM chart from DataFrame: {e}")
+        logger.error(f"Could not generate OPM chart from DataFrame for {ticker}: {e}")
         return None
 
 def create_reserves_chart(df, ticker):
@@ -137,10 +159,10 @@ def create_reserves_chart(df, ticker):
         plt.savefig(buf, format='png')
         plt.close()
         buf.seek(0)
-        print(f"Reserves Chart for {ticker} created in memory.")
+        logger.info(f"Reserves Chart for {ticker} created in memory.")
         return buf
     except Exception as e:
-        print(f"Could not generate Reserves chart: {e}")
+        logger.error(f"Could not generate Reserves chart for {ticker}: {e}")
         return None
 
 def create_cfo_chart(df, ticker):
@@ -161,13 +183,13 @@ def create_cfo_chart(df, ticker):
         plt.savefig(buf, format='png')
         plt.close()
         buf.seek(0)
-        print(f"CFO Chart for {ticker} created in memory.")
+        logger.info(f"CFO Chart for {ticker} created in memory.")
         return buf
     except Exception as e:
-        print(f"Could not generate CFO chart: {e}")
+        logger.error(f"Could not generate CFO chart for {ticker}: {e}")
         return None
 
-# --- HEADER CLEANING HELPER (No changes needed) ---
+# --- HEADER CLEANING HELPER ---
 def clean_headers(df: pd.DataFrame) -> pd.DataFrame:
     """Drop bad headers, duplicate columns, and normalize names to string."""
     df = df.loc[:, df.columns.notna()]
@@ -177,7 +199,7 @@ def clean_headers(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = df.columns.map(str)
     return df
 
-# --- DATA PARSING (No changes needed) ---
+# --- DATA PARSING ---
 def read_and_parse_data_sheet(excel_buffer: io.BytesIO):
     """Parse financial data from Excel buffer."""
     try:
@@ -213,7 +235,7 @@ def read_and_parse_data_sheet(excel_buffer: io.BytesIO):
         return pnl, bs, cf
 
     except Exception as e:
-        print(f"Error parsing 'Data Sheet': {e}"); return None, None, None
+        logger.error(f"Error parsing 'Data Sheet': {e}", exc_info=True); return None, None, None
 
 def calculate_opm_from_data_sheet(excel_buffer: io.BytesIO):
     """Calculate OPM from Excel buffer."""
@@ -250,14 +272,13 @@ def calculate_opm_from_data_sheet(excel_buffer: io.BytesIO):
         return opm_df
 
     except Exception as e:
-        print(f"Could not calculate OPM data from 'Data Sheet': {e}")
+        logger.error(f"Could not calculate OPM data from 'Data Sheet': {e}", exc_info=True)
         return None
 
 # --- LLM ANALYSIS FUNCTION ---
 def get_analysis_from_gemini(pnl_df, bs_df, cf_df, ticker, opm_table_string, agent_config: dict):
     """Sends financial data to Gemini and gets back a quantitative analysis report."""
     api_key = agent_config.get("GOOGLE_API_KEY")
-    # Using 'LITE_MODEL_NAME' for consistency, but you can change this if needed
     model_name = agent_config.get("LITE_MODEL_NAME", "gemini-1.5-flash")
 
     if not api_key:
@@ -318,12 +339,12 @@ def get_analysis_from_gemini(pnl_df, bs_df, cf_df, ticker, opm_table_string, age
         Provide a professional, data-driven analysis. Do not include investment advice.
         """
         
-        print("--- Calling Gemini for Quantitative Analysis ---")
+        logger.info(f"--- Calling Gemini for Quantitative Analysis of {ticker} ---")
         response = model.generate_content(prompt)
         return response.text
 
     except Exception as e:
-        print(f"An error occurred while calling the Gemini API: {e}")
+        logger.error(f"An error occurred while calling the Gemini API for {ticker}: {e}", exc_info=True)
         return f"ERROR: Failed to get analysis from Gemini. {e}"
 
 
@@ -333,7 +354,7 @@ def safe_extract_section(text, start_marker, end_marker=None):
         match = re.search(pattern, text, re.DOTALL)
         return match.group(1).strip() if match else ""
     except re.error as e:
-        print(f"Regex error for marker '{start_marker}': {e}"); return ""
+        logger.error(f"Regex error for marker '{start_marker}': {e}"); return ""
 
 # --- MAIN ANALYSIS FUNCTION ---
 def analyze_financials(excel_buffer: io.BytesIO, ticker: str, agent_config: dict) -> List[Dict[str, Any]]:
@@ -341,7 +362,7 @@ def analyze_financials(excel_buffer: io.BytesIO, ticker: str, agent_config: dict
     Analyzes financial data from Excel file stored in memory.
     Accepts an agent_config dictionary for API key and model names.
     """
-    print("--- Starting Quantitative Analysis ---")
+    logger.info(f"--- Starting Quantitative Analysis for {ticker} ---")
     try:
         # Parse Excel data from buffer
         annual_pnl_df, balance_sheet_df, cash_flow_df = read_and_parse_data_sheet(excel_buffer)
@@ -369,7 +390,7 @@ def analyze_financials(excel_buffer: io.BytesIO, ticker: str, agent_config: dict
         
         report_content = []
         
-        # Defining markers for splitting (No changes needed)
+        # Defining markers for splitting
         markers = {
             "rev_profit": "1. Revenue and Profitability Analysis",
             "balance_sheet": "2. Balance Sheet Analysis",
@@ -385,7 +406,7 @@ def analyze_financials(excel_buffer: io.BytesIO, ticker: str, agent_config: dict
         def remove_first_line(text):
             return text.split('\n', 1)[1] if '\n' in text else text
 
-        # Report generation logic (No changes needed here)
+        # Report generation logic
         if text_rev_profit:
             opm_marker = "**Operating Profit Margin (OPM) Trend:**"
             text_to_process = remove_first_line(text_rev_profit)
@@ -439,8 +460,9 @@ def analyze_financials(excel_buffer: io.BytesIO, ticker: str, agent_config: dict
         
         if text_summary: report_content.append({"type": "text", "content": text_summary})
         if not report_content: return [{"type": "text", "content": analysis_result_text}]
-        print("--- Finished Quantitative Analysis ---")
+        logger.info(f"--- Finished Quantitative Analysis for {ticker} ---")
         return report_content
         
     except Exception as e:
+        logger.error(f"An unexpected error in quantitative_agent for {ticker}: {e}", exc_info=True)
         return [{"type": "text", "content": f"An unexpected error in quantitative_agent: {e.__class__.__name__} {e}"}]
