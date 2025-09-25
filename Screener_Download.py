@@ -23,7 +23,8 @@ def wait_for_new_file(download_path: str, files_before: list, timeout: int = 60)
     start_time = time.time()
     while time.time() - start_time < timeout:
         files_after = os.listdir(download_path)
-        new_files = [f for f in files_after if f not in files_before and not f.endswith(('.crdownload', '.tmp'))]
+        # New, Corrected Code
+        new_files = [f for f in files_after if f not in files_before and not f.endswith(('.crdownload', '.tmp')) and not f.startswith('.')]
         if new_files:
             logging.info(f"  > SUCCESS: Downloading '{new_files[0]}'.")
             return new_files[0]
