@@ -149,9 +149,9 @@ def qualitative_analysis_node(state: StockAnalysisState):
     return {"qualitative_results": results, "log_file_content": log_content_accumulator}
 
 def delay_node(state: StockAnalysisState):
-    """A simple node that waits for 60 seconds to avoid rate limiting."""
-    #st.toast("Waiting for 60s to avoid hitting API rate limits...")
-    time.sleep(60)
+    """A simple node that waits for 65 seconds to avoid rate limiting."""
+    #st.toast("Waiting for 65s to avoid hitting API rate limits...")
+    time.sleep(65)
     # This node doesn't need to return anything to modify the state
     return {}
 
@@ -254,7 +254,7 @@ if st.sidebar.button("🚀 Run Full Analysis", type="primary"):
                             "fetch_data": "Downloading financial data...",
                             "quantitative_analysis": "Running quantitative analysis...",
                             "qualitative_analysis": "Analyzing qualitative data...",
-                            "delay_before_synthesis": "Pausing for 60s to avoid API rate limits...", # --- ADDED STATUS
+                            "delay_before_synthesis": "Pausing for 65s to avoid API rate limits...", # --- ADDED STATUS
                             "synthesis": "Generating final summary...",
                             "generate_report": "Creating PDF report..."
                         }
