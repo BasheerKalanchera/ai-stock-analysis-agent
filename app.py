@@ -76,7 +76,7 @@ class StockAnalysisState(TypedDict):
 
 # --- Agent Nodes ---
 def fetch_data_node(state: StockAnalysisState):
-    st.toast("Executing Agent 1: Data Fetcher...")
+    #st.toast("Executing Agent 1: Data Fetcher...")
     ticker = state['ticker']
     is_consolidated = state['is_consolidated']
     config = state['agent_config'] # Get config from state
@@ -107,7 +107,7 @@ def fetch_data_node(state: StockAnalysisState):
     }
 
 def quantitative_analysis_node(state: StockAnalysisState):
-    st.toast("Executing Agent 2: Quantitative Analyst...")
+    #st.toast("Executing Agent 2: Quantitative Analyst...")
     excel_data = state['file_data'].get('excel')
     log_content_accumulator = state['log_file_content']
     config = state['agent_config']
@@ -128,7 +128,7 @@ def quantitative_analysis_node(state: StockAnalysisState):
     }
 
 def qualitative_analysis_node(state: StockAnalysisState):
-    st.toast("Executing Agent 3: Qualitative Analyst...")
+    #st.toast("Executing Agent 3: Qualitative Analyst...")
     company = state['company_name'] or state['ticker']
     log_content_accumulator = state['log_file_content']
     config = state['agent_config']
@@ -150,13 +150,13 @@ def qualitative_analysis_node(state: StockAnalysisState):
 
 def delay_node(state: StockAnalysisState):
     """A simple node that waits for 60 seconds to avoid rate limiting."""
-    st.toast("Waiting for 60s to avoid hitting API rate limits...")
+    #st.toast("Waiting for 60s to avoid hitting API rate limits...")
     time.sleep(60)
     # This node doesn't need to return anything to modify the state
     return {}
 
 def synthesis_node(state: StockAnalysisState):
-    st.toast("Executing Agent 4: Synthesis Agent...")
+    #st.toast("Executing Agent 4: Synthesis Agent...")
     log_content_accumulator = state['log_file_content']
     config = state['agent_config']
     
@@ -173,7 +173,7 @@ def synthesis_node(state: StockAnalysisState):
     return {"final_report": report, "log_file_content": log_content_accumulator}
 
 def generate_report_node(state: StockAnalysisState):
-    st.toast("Executing Agent 5: Report Generator...")
+    #st.toast("Executing Agent 5: Report Generator...")
     
     pdf_buffer = io.BytesIO()
     
