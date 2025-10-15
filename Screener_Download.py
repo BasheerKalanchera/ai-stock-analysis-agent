@@ -67,7 +67,7 @@ def download_financial_data(
         # A cleaner, config-driven environment check
         if is_cloud_env:
             logging.info("Running in Streamlit Cloud (detected via config). Initializing Chromium Driver...")
-            chrome_options.add_argument("--headless")
+            #chrome_options.add_argument("--headless")
             chrome_options.add_argument("--no-sandbox")
             chrome_options.add_argument("--disable-dev-shm-usage")
             chrome_options.add_argument("--disable-gpu")
