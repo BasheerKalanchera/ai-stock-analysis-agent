@@ -28,7 +28,7 @@ def generate_investment_summary(ticker: str, quantitative_analysis: str, qualita
     Accepts an agent_config dictionary for API key and model names.
     """
     api_key = agent_config.get("GOOGLE_API_KEY")
-    model_name = agent_config.get("HEAVY_MODEL_NAME", "gemini-1.5-flash") # Use lite model for summary
+    model_name = agent_config.get("LITE_MODEL_NAME", "gemini-1.5-flash") # Use lite model for summary
 
     if not api_key:
         msg = "Synthesis Agent Error: Google API Key is not configured."
