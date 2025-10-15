@@ -200,6 +200,34 @@ workflow.add_edge("generate_report", END)
 
 app_graph = workflow.compile()
 
+# --- Helper Function for UI ---
+def extract_investment_thesis(full_report: str) -> str:
+    """Extracts the Investment Thesis section from the full markdown report."""
+    try:
+        search_key = "Investment Thesis"
+        # Find the start of the thesis section, case-insensitively
+        start_index = full_report.lower().find(search_key.lower())
+        if start_index == -1:
+            return "Investment thesis could not be extracted from the report."
+
+        # Find the actual start of the content after the heading
+        content_start_index = full_report.find('\n', start_index) + 1
+
+        # Find the start of the next section to determine the end of the thesis
+        next_section_index = full_report.find("\n## ", content_start_index)
+
+        if next_section_index == -1:
+            # If no other '##' section follows, take everything to the end
+            thesis_content = full_report[content_start_index:].strip()
+        else:
+            # Otherwise, take the content up to the next section
+            thesis_content = full_report[content_start_index:next_section_index].strip()
+
+        return thesis_content
+    except Exception as e:
+        st.error(f"An error occurred while parsing the report: {e}")
+        return "Investment thesis could not be extracted due to a formatting error."
+
 # --- Streamlit UI ---
 st.title("🤖 AI Stock Analysis Crew")
 st.header("Automated Investment Analysis Workflow", divider="rainbow")
@@ -233,10 +261,10 @@ if st.sidebar.button("🚀 Run Full Analysis", type="primary"):
             "agent_config": agent_configs
         }
         
-        with st.status("Kicking off the analysis crew...", expanded=True) as status:
+        with st.status("Our analysis crew is working on your report...", expanded=True) as status:
             final_state_result = {}
             try:
-                # --- NEW UI LOGIC FOR LIVE PROGRESS DASHBOARD ---
+                # --- UI LOGIC FOR LIVE PROGRESS DASHBOARD ---
                 placeholders = {
                     "fetch_data": st.empty(),
                     "analysis": st.empty(),
@@ -250,17 +278,14 @@ if st.sidebar.button("🚀 Run Full Analysis", type="primary"):
                     for node_name, node_output in event.items():
                         if node_name == "fetch_data":
                             placeholders["fetch_data"].markdown("✅ **Financial Data Downloaded**")
-                            placeholders["analysis"].markdown("⏳ **Running Quantitative & Qualitative Analysis...** (in parallel)")
+                            placeholders["analysis"].markdown("⏳ **Performaing Quantitative & Qualitative Analysis...** (in parallel)")
                         
                         elif node_name == "quantitative_analysis":
-                            # This node finishes, but we wait for the other parallel node
-                            # before updating the main status.
-                            pass
+                            pass # Wait for the other parallel node to finish
 
                         elif node_name == "qualitative_analysis":
-                            # This is the last of the parallel nodes to finish before the next step
                             placeholders["analysis"].markdown("✅ **Quantitative & Qualitative Analysis Complete**")
-                            placeholders["synthesis"].markdown("⏳ **Generating Final Summary...** (after 65s delay)")
+                            placeholders["synthesis"].markdown("⏳ **Generating Final Summary...**")
                         
                         elif node_name == "synthesis":
                              placeholders["synthesis"].markdown("✅ **Final Summary Generated**")
@@ -286,34 +311,48 @@ if st.session_state.final_state:
     final_state = st.session_state.final_state
     st.header(f"Analysis Results for {final_state.get('company_name') or final_state.get('ticker')}", divider="rainbow")
 
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Download Report")
+    # --- NEW UI: Show Thesis and Main Download Button ---
+    if final_state.get('final_report'):
+        st.subheader("📈📝 Investment Thesis")
+        investment_thesis = extract_investment_thesis(final_state['final_report'])
+        st.markdown(investment_thesis, unsafe_allow_html=True)
     
+    st.markdown("---") # Visual separator
+
     if final_state.get('pdf_report_bytes'):
+        st.info("For a detailed breakdown, including quantitative and qualitative analysis, please download the full report.")
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         report_filename = f"Report_{final_state.get('ticker', 'STOCK')}_{timestamp}.pdf"
-        st.sidebar.download_button(
-            label="Download PDF Report",
-            data=final_state['pdf_report_bytes'],
-            file_name=report_filename,
-            mime="application/pdf"
-        )
-    
-    if final_state.get('final_report'):
-        st.subheader("📈📝 Comprehensive Investment Summary")
-        st.markdown(final_state['final_report'], unsafe_allow_html=True)
+        
+        # Center the button
+        col1, col2, col3 = st.columns([2, 3, 2])
+        with col2:
+            st.download_button(
+                label="**Download Full PDF Report**",
+                data=final_state['pdf_report_bytes'],
+                file_name=report_filename,
+                mime="application/pdf",
+                use_container_width=True
+            )
 
-    with st.expander("📂 View Individual Agent Outputs & Logs", expanded=False):
+    # --- Old UI elements are now in an expander ---
+    with st.expander("📂 View Detailed Agent Outputs & Logs", expanded=False):
         if final_state.get('log_file_content'):
              st.code(final_state['log_file_content'], language='markdown')
+        
+        st.subheader("📈 Full Quantitative Insights")
         if final_state.get('quant_text_for_synthesis'):
-            st.subheader("📈 Quantitative Insights")
             st.markdown(final_state['quant_text_for_synthesis'])
+        else:
+            st.markdown("Quantitative analysis was not performed or yielded no text results.")
+
+        st.subheader("📝 Full Qualitative Insights")
         if final_state.get('qualitative_results'):
-            st.subheader("📝 Qualitative Insights")
             qual_results = final_state['qualitative_results']
             for key, value in qual_results.items():
                 st.markdown(f"**{key.replace('_', ' ').title()}:** {value}")
+        else:
+            st.markdown("Qualitative analysis was not performed or yielded no results.")
 else:
     st.info("Enter a stock ticker in the sidebar and click 'Run Full Analysis' to begin.")
 
