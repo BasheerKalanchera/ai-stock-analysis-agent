@@ -4,7 +4,7 @@ import datetime
 from dotenv import load_dotenv
 from typing import TypedDict, Dict, Any, List, Annotated
 import io
-import time # --- ADDED for the delay
+import time
 
 # --- LangGraph Imports ---
 from langgraph.graph import StateGraph, END
@@ -28,8 +28,8 @@ try:
         "SCREENER_EMAIL": st.secrets["SCREENER_EMAIL"],
         "SCREENER_PASSWORD": st.secrets["SCREENER_PASSWORD"],
         "GOOGLE_API_KEY": st.secrets["GOOGLE_API_KEY"],
-        "LITE_MODEL_NAME": st.secrets.get("LITE_MODEL_NAME", "gemini-1.5-flash"),
-        "HEAVY_MODEL_NAME": st.secrets.get("HEAVY_MODEL_NAME", "gemini-1.5-pro"),
+        "LITE_MODEL_NAME": st.secrets.get("LITE_MODEL_NAME", "gemini-2.5-flash-lite"),
+        "HEAVY_MODEL_NAME": st.secrets.get("HEAVY_MODEL_NAME", "gemini-2.5-flash"),
         "IS_CLOUD_ENV": True # Explicitly set environment flag
     }
 except (st.errors.StreamlitAPIException, KeyError) as e:
@@ -39,8 +39,8 @@ except (st.errors.StreamlitAPIException, KeyError) as e:
             "SCREENER_EMAIL": os.getenv("SCREENER_EMAIL"),
             "SCREENER_PASSWORD": os.getenv("SCREENER_PASSWORD"),
             "GOOGLE_API_KEY": os.getenv("GOOGLE_API_KEY"),
-            "LITE_MODEL_NAME": os.getenv("LITE_MODEL_NAME", "gemini-1.5-flash"),
-            "HEAVY_MODEL_NAME": os.getenv("HEAVY_MODEL_NAME", "gemini-1.5-pro"),
+            "LITE_MODEL_NAME": os.getenv("LITE_MODEL_NAME", "gemini-2.5-flash-lite"),
+            "HEAVY_MODEL_NAME": os.getenv("HEAVY_MODEL_NAME", "gemini-2.5-flash"),
             "IS_CLOUD_ENV": False # Explicitly set environment flag
         }
     else:
@@ -76,7 +76,6 @@ class StockAnalysisState(TypedDict):
 
 # --- Agent Nodes ---
 def fetch_data_node(state: StockAnalysisState):
-    #st.toast("Executing Agent 1: Data Fetcher...")
     ticker = state['ticker']
     is_consolidated = state['is_consolidated']
     config = state['agent_config'] # Get config from state
@@ -107,7 +106,6 @@ def fetch_data_node(state: StockAnalysisState):
     }
 
 def quantitative_analysis_node(state: StockAnalysisState):
-    #st.toast("Executing Agent 2: Quantitative Analyst...")
     excel_data = state['file_data'].get('excel')
     log_content_accumulator = state['log_file_content']
     config = state['agent_config']
@@ -128,7 +126,6 @@ def quantitative_analysis_node(state: StockAnalysisState):
     }
 
 def qualitative_analysis_node(state: StockAnalysisState):
-    #st.toast("Executing Agent 3: Qualitative Analyst...")
     company = state['company_name'] or state['ticker']
     log_content_accumulator = state['log_file_content']
     config = state['agent_config']
@@ -150,13 +147,10 @@ def qualitative_analysis_node(state: StockAnalysisState):
 
 def delay_node(state: StockAnalysisState):
     """A simple node that waits for 65 seconds to avoid rate limiting."""
-    #st.toast("Waiting for 65s to avoid hitting API rate limits...")
     time.sleep(65)
-    # This node doesn't need to return anything to modify the state
     return {}
 
 def synthesis_node(state: StockAnalysisState):
-    #st.toast("Executing Agent 4: Synthesis Agent...")
     log_content_accumulator = state['log_file_content']
     config = state['agent_config']
     
@@ -173,8 +167,6 @@ def synthesis_node(state: StockAnalysisState):
     return {"final_report": report, "log_file_content": log_content_accumulator}
 
 def generate_report_node(state: StockAnalysisState):
-    #st.toast("Executing Agent 5: Report Generator...")
-    
     pdf_buffer = io.BytesIO()
     
     create_pdf_report(
@@ -193,7 +185,7 @@ workflow = StateGraph(StockAnalysisState)
 workflow.add_node("fetch_data", fetch_data_node)
 workflow.add_node("quantitative_analysis", quantitative_analysis_node)
 workflow.add_node("qualitative_analysis", qualitative_analysis_node)
-workflow.add_node("delay_before_synthesis", delay_node) # --- ADDED NODE
+workflow.add_node("delay_before_synthesis", delay_node)
 workflow.add_node("synthesis", synthesis_node)
 workflow.add_node("generate_report", generate_report_node)
 
@@ -201,12 +193,8 @@ workflow.set_entry_point("fetch_data")
 
 workflow.add_edge("fetch_data", "quantitative_analysis")
 workflow.add_edge("fetch_data", "qualitative_analysis")
-
-# --- REROUTED EDGES to go through the delay node ---
 workflow.add_edge(["quantitative_analysis", "qualitative_analysis"], "delay_before_synthesis")
 workflow.add_edge("delay_before_synthesis", "synthesis")
-# --- END OF REROUTING ---
-
 workflow.add_edge("synthesis", "generate_report")
 workflow.add_edge("generate_report", END)
 
@@ -245,22 +233,42 @@ if st.sidebar.button("🚀 Run Full Analysis", type="primary"):
             "agent_config": agent_configs
         }
         
-        with st.status("Running Analysis Crew...", expanded=True) as status:
+        with st.status("Kicking off the analysis crew...", expanded=True) as status:
             final_state_result = {}
             try:
+                # --- NEW UI LOGIC FOR LIVE PROGRESS DASHBOARD ---
+                placeholders = {
+                    "fetch_data": st.empty(),
+                    "analysis": st.empty(),
+                    "synthesis": st.empty(),
+                    "report": st.empty(),
+                }
+                
+                placeholders["fetch_data"].markdown("⏳ **Downloading Financial Data...**")
+
                 for event in app_graph.stream(inputs):
                     for node_name, node_output in event.items():
-                        status_messages = {
-                            "fetch_data": "Downloading financial data...",
-                            "quantitative_analysis": "Running quantitative analysis...",
-                            "qualitative_analysis": "Analyzing qualitative data...",
-                            "delay_before_synthesis": "Pausing for 65s to avoid API rate limits...", # --- ADDED STATUS
-                            "synthesis": "Generating final summary...",
-                            "generate_report": "Creating PDF report..."
-                        }
-                        if node_name in status_messages:
-                            status.update(label=status_messages[node_name])
+                        if node_name == "fetch_data":
+                            placeholders["fetch_data"].markdown("✅ **Financial Data Downloaded**")
+                            placeholders["analysis"].markdown("⏳ **Running Quantitative & Qualitative Analysis...** (in parallel)")
                         
+                        elif node_name == "quantitative_analysis":
+                            # This node finishes, but we wait for the other parallel node
+                            # before updating the main status.
+                            pass
+
+                        elif node_name == "qualitative_analysis":
+                            # This is the last of the parallel nodes to finish before the next step
+                            placeholders["analysis"].markdown("✅ **Quantitative & Qualitative Analysis Complete**")
+                            placeholders["synthesis"].markdown("⏳ **Generating Final Summary...** (after 65s delay)")
+                        
+                        elif node_name == "synthesis":
+                             placeholders["synthesis"].markdown("✅ **Final Summary Generated**")
+                             placeholders["report"].markdown("⏳ **Creating Final PDF Report...**")
+                        
+                        elif node_name == "generate_report":
+                            placeholders["report"].markdown("✅ **Final PDF Report Created**")
+
                         if node_output:
                             final_state_result.update(node_output)
                 
@@ -308,3 +316,4 @@ if st.session_state.final_state:
                 st.markdown(f"**{key.replace('_', ' ').title()}:** {value}")
 else:
     st.info("Enter a stock ticker in the sidebar and click 'Run Full Analysis' to begin.")
+
