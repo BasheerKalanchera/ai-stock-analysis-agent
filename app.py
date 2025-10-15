@@ -4,6 +4,7 @@ import datetime
 from dotenv import load_dotenv
 from typing import TypedDict, Dict, Any, List, Annotated
 import io
+import time # --- ADDED for the delay
 
 # --- LangGraph Imports ---
 from langgraph.graph import StateGraph, END
@@ -147,6 +148,13 @@ def qualitative_analysis_node(state: StockAnalysisState):
     log_content_accumulator += log_entry
     return {"qualitative_results": results, "log_file_content": log_content_accumulator}
 
+def delay_node(state: StockAnalysisState):
+    """A simple node that waits for 60 seconds to avoid rate limiting."""
+    st.toast("Waiting for 60s to avoid hitting API rate limits...")
+    time.sleep(60)
+    # This node doesn't need to return anything to modify the state
+    return {}
+
 def synthesis_node(state: StockAnalysisState):
     st.toast("Executing Agent 4: Synthesis Agent...")
     log_content_accumulator = state['log_file_content']
@@ -185,6 +193,7 @@ workflow = StateGraph(StockAnalysisState)
 workflow.add_node("fetch_data", fetch_data_node)
 workflow.add_node("quantitative_analysis", quantitative_analysis_node)
 workflow.add_node("qualitative_analysis", qualitative_analysis_node)
+workflow.add_node("delay_before_synthesis", delay_node) # --- ADDED NODE
 workflow.add_node("synthesis", synthesis_node)
 workflow.add_node("generate_report", generate_report_node)
 
@@ -192,7 +201,12 @@ workflow.set_entry_point("fetch_data")
 
 workflow.add_edge("fetch_data", "quantitative_analysis")
 workflow.add_edge("fetch_data", "qualitative_analysis")
-workflow.add_edge(["quantitative_analysis", "qualitative_analysis"], "synthesis")
+
+# --- REROUTED EDGES to go through the delay node ---
+workflow.add_edge(["quantitative_analysis", "qualitative_analysis"], "delay_before_synthesis")
+workflow.add_edge("delay_before_synthesis", "synthesis")
+# --- END OF REROUTING ---
+
 workflow.add_edge("synthesis", "generate_report")
 workflow.add_edge("generate_report", END)
 
@@ -240,6 +254,7 @@ if st.sidebar.button("🚀 Run Full Analysis", type="primary"):
                             "fetch_data": "Downloading financial data...",
                             "quantitative_analysis": "Running quantitative analysis...",
                             "qualitative_analysis": "Analyzing qualitative data...",
+                            "delay_before_synthesis": "Pausing for 60s to avoid API rate limits...", # --- ADDED STATUS
                             "synthesis": "Generating final summary...",
                             "generate_report": "Creating PDF report..."
                         }
