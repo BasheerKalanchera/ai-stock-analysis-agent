@@ -7,6 +7,8 @@ import datetime
 import io
 import logging
 from typing import List, Dict, Any
+import time  # <--- ADD THIS
+from google.api_core import exceptions as google_exceptions # <--- AND THIS
 
 # --- CUSTOM LOGGER SETUP ---
 # 1. Get a custom logger
@@ -207,7 +209,7 @@ def read_and_parse_data_sheet(excel_buffer: io.BytesIO):
         excel_buffer.seek(0)
         report_date_indices = df[df.iloc[:, 0].astype(str).str.contains('Report Date', na=False)].index
         annual_headers_row_index = report_date_indices[0]
-        annual_headers = [h.strftime('%Y-%m-%d') if isinstance(h, datetime.datetime) else str(h) for h in df.iloc[annual_headers_row_index, :].tolist()]
+        annual_headers = [h.strftime('%Y') if isinstance(h, datetime.datetime) else str(h) for h in df.iloc[annual_headers_row_index, :].tolist()]
         annual_headers[0] = 'Narration'
         
         pnl_start = df[df.iloc[:, 0].astype(str).str.contains('PROFIT & LOSS', na=False)].index[0]
@@ -266,8 +268,8 @@ def calculate_opm_from_data_sheet(excel_buffer: io.BytesIO):
         opm_percent = (operating_profit / sales_series) * 100
 
         opm_df = pd.DataFrame({'Operating Profit (Cr)': operating_profit, 'OPM %': opm_percent.round(2)}).T
-        opm_df.columns = [col.strftime('%Y-%m-%d') if isinstance(col, datetime.datetime) else col for col in opm_df.columns]
-        opm_df.rename(columns={col: col.strftime('%Y-%m-%d') if isinstance(col, datetime.datetime) else col for col in opm_df.columns}, inplace=True)
+        opm_df.columns = [col.strftime('%Y') if isinstance(col, datetime.datetime) else col for col in opm_df.columns]
+        opm_df.rename(columns={col: col.strftime('%Y') if isinstance(col, datetime.datetime) else col for col in opm_df.columns}, inplace=True)
         opm_df = clean_headers(opm_df)
         return opm_df
 
@@ -282,7 +284,9 @@ def get_analysis_from_gemini(pnl_df, bs_df, cf_df, ticker, opm_table_string, age
     model_name = agent_config.get("LITE_MODEL_NAME", "gemini-1.5-flash")
 
     if not api_key:
-        return "ERROR: Google API Key not configured."
+        msg = f"ERROR: Google API Key not configured for quantitative agent."
+        logger.error(msg)
+        return msg
 
     try:
         genai.configure(api_key=api_key)
@@ -339,12 +343,48 @@ def get_analysis_from_gemini(pnl_df, bs_df, cf_df, ticker, opm_table_string, age
         Provide a professional, data-driven analysis. Do not include investment advice.
         """
         
-        logger.info(f"--- Calling Gemini for Quantitative Analysis of {ticker} ---")
-        response = model.generate_content(prompt)
-        return response.text
+        # --- START NEW RETRY LOGIC ---
+        max_retries = 3
+        base_delay_seconds = 65 
+
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"--- Calling Gemini for Quantitative Analysis of {ticker} (Attempt {attempt + 1}) ---")
+                response = model.generate_content(prompt)
+                logger.info(f"--- Finished Gemini Call for {ticker} ---")
+                return response.text
+            
+            # Specific catch for 429 Resource Exhausted errors
+            except (google_exceptions.ResourceExhausted, google_exceptions.TooManyRequests) as e:
+                logger.warning(f"Rate limit hit for '{ticker}' quantitative analysis: {e}. Waiting {base_delay_seconds}s to retry...")
+                if attempt < max_retries - 1:
+                    time.sleep(base_delay_seconds)
+                else:
+                    logger.error(f"Final attempt failed for '{ticker}' quantitative analysis.")
+                    return f"ERROR: Failed to get analysis from Gemini after {max_retries} attempts. Rate limit exceeded. {str(e)}"
+            
+            # Catch for other errors
+            except Exception as e:
+                # Check if it's a 429 wrapped in a generic exception
+                if "429" in str(e):
+                     logger.warning(f"Rate limit (429) detected for '{ticker}' quantitative analysis: {e}. Waiting {base_delay_seconds}s to retry...")
+                     if attempt < max_retries - 1:
+                        time.sleep(base_delay_seconds)
+                     else:
+                        logger.error(f"Final attempt failed for '{ticker}' quantitative analysis.")
+                        return f"ERROR: Failed to get analysis from Gemini after {max_retries} attempts. Rate limit exceeded. {str(e)}"
+                else:
+                    # This was a non-retryable error
+                    logger.error(f"An error occurred while calling the Gemini API for {ticker}: {e}", exc_info=True)
+                    return f"ERROR: Failed to get analysis from Gemini. {e}"
+        
+        # This line should not be reachable, but as a fallback:
+        return f"ERROR: Failed to get analysis from Gemini after {max_retries} attempts."
+        # --- END NEW RETRY LOGIC ---
 
     except Exception as e:
-        logger.error(f"An error occurred while calling the Gemini API for {ticker}: {e}", exc_info=True)
+        # This outer try/except catches setup errors (e.g., in pandas formatting)
+        logger.error(f"An unexpected error occurred *before* calling Gemini for {ticker}: {e}", exc_info=True)
         return f"ERROR: Failed to get analysis from Gemini. {e}"
 
 

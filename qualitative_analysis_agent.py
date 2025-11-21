@@ -5,6 +5,8 @@ import google.generativeai as genai
 from typing import Optional, Dict
 from functools import lru_cache
 import logging
+import time 
+from google.api_core import exceptions as google_exceptions
 
 # --- CUSTOM LOGGER SETUP ---
 # 1. Get a custom logger
@@ -44,43 +46,125 @@ def _extract_text_from_pdf_buffer(pdf_buffer: io.BytesIO | None) -> str:
 
 @lru_cache(maxsize=32)
 def _analyze_with_gemini(prompt: str, analysis_type: str, model_name: str, api_key: str) -> str:
-    """Cached version of Gemini API calls that accepts an API key."""
+    """Cached version of Gemini API calls that accepts an API key, now with retry logic."""
     if not api_key:
         msg = f"Analysis skipped for '{analysis_type}': Google API Key is not configured."
         logger.warning(msg)
         return msg
     
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(model_name)
-        logger.info(f"Calling Gemini for '{analysis_type}' analysis...")
-        response = model.generate_content(prompt)
-        logger.info(f"Finished '{analysis_type}' analysis.")
-        return response.text
-    except Exception as e:
-        logger.error(f"Could not generate '{analysis_type}' analysis. Error: {e}")
-        return f"Could not generate '{analysis_type}' analysis. {str(e)}"
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(model_name)
+    
+    max_retries = 3
+    # Use a 65-second delay to be safe, as the free tier limit is often 1 req/min
+    base_delay_seconds = 65 
+
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Calling Gemini for '{analysis_type}' analysis... (Attempt {attempt + 1})")
+            response = model.generate_content(prompt)
+            logger.info(f"Finished '{analysis_type}' analysis.")
+            return response.text
+        
+        # Specific catch for 429 Resource Exhausted errors
+        except (google_exceptions.ResourceExhausted, google_exceptions.TooManyRequests) as e:
+            logger.warning(f"Rate limit hit for '{analysis_type}': {e}. Waiting {base_delay_seconds}s to retry...")
+            if attempt < max_retries - 1:
+                time.sleep(base_delay_seconds)
+            else:
+                logger.error(f"Final attempt failed for '{analysis_type}'.")
+                return f"Could not generate '{analysis_type}' analysis after {max_retries} attempts. Rate limit exceeded. {str(e)}"
+        
+        # Catch for other errors
+        except Exception as e:
+            # Check if it's a 429 wrapped in a generic exception
+            if "429" in str(e):
+                 logger.warning(f"Rate limit (429) detected for '{analysis_type}': {e}. Waiting {base_delay_seconds}s to retry...")
+                 if attempt < max_retries - 1:
+                    time.sleep(base_delay_seconds)
+                 else:
+                    logger.error(f"Final attempt failed for '{analysis_type}'.")
+                    return f"Could not generate '{analysis_type}' analysis after {max_retries} attempts. Rate limit exceeded. {str(e)}"
+            else:
+                # This was a non-retryable error
+                logger.error(f"Could not generate '{analysis_type}' analysis. Error: {e}")
+                return f"Could not generate '{analysis_type}' analysis. {str(e)}"
+    
+    # This line should not be reachable, but as a fallback:
+    return f"Could not generate '{analysis_type}' analysis after {max_retries} attempts."
+
+# def _compare_transcripts(latest_text: str, previous_text: str, agent_config: dict) -> str:
+#     """Compare latest and previous transcripts"""
+#     prompt = f"""
+#     You are an expert financial analyst. Your task is to compare and contrast the company's performance based on the two provided earnings conference call transcripts.
+#     Analyze the tone, key metrics, management outlook, and any significant changes or new information between the two quarters.
+#     **Latest Quarter Transcript:**
+#     ---
+#     {latest_text}
+#     ---
+#     **Previous Quarter Transcript:**
+#     ---
+#     {previous_text}
+#     **Your Task:**
+#     Provide a structured comparison in Markdown format. Use bullet points and headers. Focus on:
+#     - **Overall Sentiment Shift:** Did the management tone become more optimistic, cautious, or stay the same?
+#     - **Financial & Operational Highlights:** Compare key performance indicators mentioned in both calls (e.g., revenue growth, margins, order book).
+#     - **Segment Performance:** Note any changes in the performance of different business segments.
+#     - **Outlook & Guidance:** Compare the future outlook or guidance provided in each call.
+#     - **Key Concerns:** Did any concerns from the previous quarter get resolved? Are there any new concerns in the latest quarter?
+#     Directly quote relevant phrases from BOTH transcripts to support your points.
+#     """
+#     return _analyze_with_gemini(prompt, "Quarter-over-Quarter Comparison",
+#                                 agent_config.get("LITE_MODEL_NAME", "gemini-1.5-flash"),
+#                                 agent_config.get("GOOGLE_API_KEY"))
 
 def _compare_transcripts(latest_text: str, previous_text: str, agent_config: dict) -> str:
     """Compare latest and previous transcripts"""
     prompt = f"""
     You are an expert financial analyst. Your task is to compare and contrast the company's performance based on the two provided earnings conference call transcripts.
-    Analyze the tone, key metrics, management outlook, and any significant changes or new information between the two quarters.
+
+    **CRITICAL INSTRUCTION:** You **must** generate your response as a single, valid JSON array of objects. Do not include any text, code blocks, or explanations before or after the JSON.
+    
+    The JSON array must contain objects with these exact keys:
+    1.  "Metric"
+    2.  "Latest Quarter Analysis"
+    3.  "Previous Quarter Analysis"
+
+    **FORMATTING:** For the analysis values, use a single string. Inside that string, use Markdown bullets (`* `).
+    **IMPORTANT:** All newlines inside the JSON strings **MUST be escaped as `\\n`**. Do not use literal newlines.
+
+    **JSON STRUCTURE EXAMPLE (Note the `\\n`):**
+    [
+      {{
+        "Metric": "Overall Sentiment Shift",
+        "Latest Quarter Analysis": "* The tone is cautious, with the MD expressing concerns.\\n* There is a clear emphasis on navigating the US tariff situation.",
+        "Previous Quarter Analysis": "* The tone is generally positive, highlighting strong performance.\\n* Emphasis on positive developments."
+      }},
+      {{
+        "Metric": "Financial & Operational Highlights",
+        "Latest Quarter Analysis": "* Revenue grew 8%.\\n* PBT grew by 18%.",
+        "Previous Quarter Analysis": "* Revenue grew by 15%.\\n* Good net cash position."
+      }}
+    ]
+
+    **You must include rows for at least the following metrics:**
+    * Overall Sentiment Shift
+    * Financial & Operational Highlights
+    * Segment Performance
+    * Outlook & Guidance
+    * Key Concerns / New Issues
+
     **Latest Quarter Transcript:**
     ---
     {latest_text}
     ---
+
     **Previous Quarter Transcript:**
     ---
     {previous_text}
-    **Your Task:**
-    Provide a structured comparison in Markdown format. Use bullet points and headers. Focus on:
-    - **Overall Sentiment Shift:** Did the management tone become more optimistic, cautious, or stay the same?
-    - **Financial & Operational Highlights:** Compare key performance indicators mentioned in both calls (e.g., revenue growth, margins, order book).
-    - **Segment Performance:** Note any changes in the performance of different business segments.
-    - **Outlook & Guidance:** Compare the future outlook or guidance provided in each call.
-    - **Key Concerns:** Did any concerns from the previous quarter get resolved? Are there any new concerns in the latest quarter?
-    Directly quote relevant phrases from BOTH transcripts to support your points.
+    ---
+
+    **Your Output (VALID JSON array only):**
     """
     return _analyze_with_gemini(prompt, "Quarter-over-Quarter Comparison",
                                 agent_config.get("LITE_MODEL_NAME", "gemini-1.5-flash"),

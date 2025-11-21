@@ -1,5 +1,7 @@
 import google.generativeai as genai
 import logging
+import time
+from google.api_core import exceptions as google_exceptions
 
 # --- CUSTOM LOGGER SETUP ---
 # 1. Get a custom logger
@@ -98,10 +100,49 @@ def generate_investment_summary(ticker: str, quantitative_analysis: str, qualita
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(model_name)
-        response = model.generate_content(prompt)
-        logger.info(f"Finished final analysis for {ticker}.")
-        return response.text
+        
+        # --- START NEW RETRY LOGIC ---
+        max_retries = 3
+        base_delay_seconds = 65 
+
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Calling Gemini for synthesis of {ticker} (Attempt {attempt + 1})")
+                response = model.generate_content(prompt)
+                logger.info(f"Finished final analysis for {ticker}.")
+                return response.text
+            
+            # Specific catch for 429 Resource Exhausted errors
+            except (google_exceptions.ResourceExhausted, google_exceptions.TooManyRequests) as e:
+                logger.warning(f"Rate limit hit for '{ticker}' synthesis: {e}. Waiting {base_delay_seconds}s to retry...")
+                if attempt < max_retries - 1:
+                    time.sleep(base_delay_seconds)
+                else:
+                    logger.error(f"Final attempt failed for '{ticker}' synthesis.")
+                    return f"An error occurred during synthesis analysis for {ticker} after {max_retries} attempts. Rate limit exceeded. {str(e)}"
+            
+            # Catch for other errors (wrapped in the same loop)
+            except Exception as e:
+                # Check if it's a 429 wrapped in a generic exception
+                if "429" in str(e):
+                     logger.warning(f"Rate limit (429) detected for '{ticker}' synthesis: {e}. Waiting {base_delay_seconds}s to retry...")
+                     if attempt < max_retries - 1:
+                        time.sleep(base_delay_seconds)
+                     else:
+                        logger.error(f"Final attempt failed for '{ticker}' synthesis.")
+                        return f"An error occurred during synthesis analysis for {ticker} after {max_retries} attempts. Rate limit exceeded. {str(e)}"
+                else:
+                    # This was a non-retryable error
+                    error_msg = f"An error occurred during synthesis analysis for {ticker}: {e}"
+                    logger.error(error_msg)
+                    return error_msg
+        
+        # Fallback return (should be unreachable)
+        return f"An error occurred during synthesis analysis for {ticker} after {max_retries} attempts."
+        # --- END NEW RETRY LOGIC ---
+
     except Exception as e:
-        error_msg = f"An error occurred during synthesis analysis for {ticker}: {e}"
+        # This outer try/except catches setup errors (e.g., genai.configure)
+        error_msg = f"A setup error occurred during synthesis analysis for {ticker}: {e}"
         logger.error(error_msg)
         return error_msg
