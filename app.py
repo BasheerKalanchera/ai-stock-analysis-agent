@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from typing import TypedDict, Dict, Any, List, Annotated
 import io
 import time
+import pandas as pd 
 
 # --- LangGraph Imports ---
 from langgraph.graph import StateGraph, END
@@ -13,27 +14,28 @@ from langgraph.graph import StateGraph, END
 from Screener_Download import download_financial_data
 from qualitative_analysis_agent import run_qualitative_analysis
 from quantitative_agent import analyze_financials
+from valuation_agent import run_valuation_analysis # <--- NEW IMPORT
 from synthesis_agent import generate_investment_summary
 from report_generator import create_pdf_report
 
 # --- Page Configuration ---
 st.set_page_config(page_title="AI Stock Analysis Crew", page_icon="🤖", layout="wide")
-load_dotenv() # Load .env file for local development
+load_dotenv() 
 
 # --- CENTRALIZED SECRET & CONFIGURATION HANDLING ---
 agent_configs = {}
 try:
-    # This will succeed on Streamlit Cloud, setting IS_CLOUD_ENV to True
+    # This will succeed on Streamlit Cloud
     agent_configs = {
         "SCREENER_EMAIL": st.secrets["SCREENER_EMAIL"],
         "SCREENER_PASSWORD": st.secrets["SCREENER_PASSWORD"],
         "GOOGLE_API_KEY": st.secrets["GOOGLE_API_KEY"],
         "LITE_MODEL_NAME": st.secrets.get("LITE_MODEL_NAME", "gemini-2.5-flash-lite"),
         "HEAVY_MODEL_NAME": st.secrets.get("HEAVY_MODEL_NAME", "gemini-2.5-flash"),
-        "IS_CLOUD_ENV": True # Explicitly set environment flag
+        "IS_CLOUD_ENV": True 
     }
 except (st.errors.StreamlitAPIException, KeyError) as e:
-    # This will happen locally if secrets.toml doesn't exist or is incomplete
+    # This will happen locally
     if "No secrets found" in str(e) or isinstance(e, KeyError):
         agent_configs = {
             "SCREENER_EMAIL": os.getenv("SCREENER_EMAIL"),
@@ -41,49 +43,47 @@ except (st.errors.StreamlitAPIException, KeyError) as e:
             "GOOGLE_API_KEY": os.getenv("GOOGLE_API_KEY"),
             "LITE_MODEL_NAME": os.getenv("LITE_MODEL_NAME", "gemini-2.5-flash-lite"),
             "HEAVY_MODEL_NAME": os.getenv("HEAVY_MODEL_NAME", "gemini-2.5-flash"),
-            "IS_CLOUD_ENV": False # Explicitly set environment flag
+            "IS_CLOUD_ENV": False 
         }
     else:
         raise e
 
-# Validate that essential secrets were loaded
+# Validate secrets
 essential_keys = ["SCREENER_EMAIL", "SCREENER_PASSWORD", "GOOGLE_API_KEY"]
 missing_keys = [key for key in essential_keys if not agent_configs.get(key)]
-
 if missing_keys:
-    st.error(f"The following secrets are missing: {', '.join(missing_keys)}. Please set them in your .env file locally or in st.secrets for cloud deployment.")
+    st.error(f"Missing secrets: {', '.join(missing_keys)}.")
     st.stop()
-# --- END OF CONFIGURATION HANDLING ---
 
 
 # --- Define Graph State ---
 class StockAnalysisState(TypedDict):
     """
     State container for the stock analysis workflow.
-    All file data is stored in memory using BytesIO objects.
     """
     ticker: str
     company_name: str | None
     file_data: Dict[str, io.BytesIO]
+    peer_data: pd.DataFrame | None 
     quant_results_structured: List[Dict[str, Any]] | None
     quant_text_for_synthesis: str | None
     qualitative_results: Dict[str, Any] | None
+    valuation_results: Dict[str, Any] | None # <--- NEW STATE KEY
     final_report: str | None
     log_file_content: Annotated[str, lambda x, y: x + y]
     pdf_report_bytes: bytes | None
     is_consolidated: bool | None
-    agent_config: Dict[str, Any] # Holds all secrets and configs
+    agent_config: Dict[str, Any] 
 
 # --- Agent Nodes ---
 def fetch_data_node(state: StockAnalysisState):
     ticker = state['ticker']
     is_consolidated = state['is_consolidated']
-    config = state['agent_config'] # Get config from state
+    config = state['agent_config']
     
     log_content_accumulator = state.get('log_file_content', "")
 
-    # Pass the entire config object
-    company_name, file_data = download_financial_data(
+    company_name, file_data, peer_data = download_financial_data(
         ticker,
         config,
         is_consolidated
@@ -91,9 +91,13 @@ def fetch_data_node(state: StockAnalysisState):
     
     timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_header = f"AGENT 1: DOWNLOAD SUMMARY for {company_name or ticker}"
+    
+    peer_status = "Downloaded" if not peer_data.empty else "Not Found/Failed"
+
     log_entry = (f"## {log_header}\n\n"
                  f"**Timestamp**: {timestamp_str}\n\n"
                  f"**Excel Data**: {'Downloaded' if file_data.get('excel') else 'Failed'}\n\n"
+                 f"**Peer Data**: {peer_status}\n\n" 
                  f"**Latest Transcript**: {'Downloaded' if file_data.get('latest_transcript') else 'Failed'}\n\n"
                  f"**Previous Transcript**: {'Downloaded' if file_data.get('previous_transcript') else 'Failed'}\n\n---\n\n")
     
@@ -102,6 +106,7 @@ def fetch_data_node(state: StockAnalysisState):
     return {
         "company_name": company_name, 
         "file_data": file_data,
+        "peer_data": peer_data, 
         "log_file_content": log_content_accumulator
     }
 
@@ -145,8 +150,27 @@ def qualitative_analysis_node(state: StockAnalysisState):
     log_content_accumulator += log_entry
     return {"qualitative_results": results, "log_file_content": log_content_accumulator}
 
+# --- NEW NODE: VALUATION ANALYSIS ---
+def valuation_analysis_node(state: StockAnalysisState):
+    ticker = state['ticker']
+    peer_data = state.get('peer_data')
+    config = state['agent_config']
+    log_content_accumulator = state['log_file_content']
+    
+    # Run the agent
+    results = run_valuation_analysis(ticker, peer_data, config)
+    
+    content = results.get("content", "No valuation analysis generated.")
+    
+    log_content_accumulator += f"## AGENT 5: VALUATION & GOVERNANCE ANALYSIS\n\n{content}\n\n---\n\n"
+    
+    return {
+        "valuation_results": results,
+        "log_file_content": log_content_accumulator
+    }
+# ------------------------------------
+
 def delay_node(state: StockAnalysisState):
-    """A simple node that waits for 65 seconds to avoid rate limiting."""
     time.sleep(65)
     return {}
 
@@ -156,10 +180,13 @@ def synthesis_node(state: StockAnalysisState):
     
     quant_text = state.get('quant_text_for_synthesis', "Quantitative analysis was not performed.")
     
+    # Note: We haven't updated synthesis_agent.py yet, so it won't use valuation results in the final text
+    # But the node will run successfully.
     report = generate_investment_summary(
         state['company_name'] or state['ticker'],
         quant_text,
         state['qualitative_results'],
+        state['valuation_results'], # <--- NEW ARGUMENT
         config
     )
     
@@ -185,15 +212,20 @@ workflow = StateGraph(StockAnalysisState)
 workflow.add_node("fetch_data", fetch_data_node)
 workflow.add_node("quantitative_analysis", quantitative_analysis_node)
 workflow.add_node("qualitative_analysis", qualitative_analysis_node)
+workflow.add_node("valuation_analysis", valuation_analysis_node) # <--- ADD NODE
 workflow.add_node("delay_before_synthesis", delay_node)
 workflow.add_node("synthesis", synthesis_node)
 workflow.add_node("generate_report", generate_report_node)
 
 workflow.set_entry_point("fetch_data")
 
+# SEQUENTIAL FLOW for Safety:
+# Fetch -> Quant -> Qual -> Valuation -> Synthesis
 workflow.add_edge("fetch_data", "quantitative_analysis")
 workflow.add_edge("quantitative_analysis", "qualitative_analysis")
-workflow.add_edge("qualitative_analysis", "synthesis")
+workflow.add_edge("qualitative_analysis", "valuation_analysis") # <--- Connect Qual to Val
+workflow.add_edge("valuation_analysis", "synthesis")            # <--- Connect Val to Synthesis
+
 workflow.add_edge("synthesis", "generate_report")
 workflow.add_edge("generate_report", END)
 
@@ -201,30 +233,18 @@ app_graph = workflow.compile()
 
 # --- Helper Function for UI ---
 def extract_investment_thesis(full_report: str) -> str:
-    """Extracts the Investment Thesis section from the full markdown report."""
     try:
         search_key = "Investment Thesis"
-        # Find the start of the thesis section, case-insensitively
         start_index = full_report.lower().find(search_key.lower())
-        if start_index == -1:
-            return "Investment thesis could not be extracted from the report."
-
-        # Find the actual start of the content after the heading
+        if start_index == -1: return "Investment thesis could not be extracted."
         content_start_index = full_report.find('\n', start_index) + 1
-
-        # Find the start of the next section to determine the end of the thesis
         next_section_index = full_report.find("\n## ", content_start_index)
-
         if next_section_index == -1:
-            # If no other '##' section follows, take everything to the end
             thesis_content = full_report[content_start_index:].strip()
         else:
-            # Otherwise, take the content up to the next section
             thesis_content = full_report[content_start_index:next_section_index].strip()
-
         return thesis_content
     except Exception as e:
-        st.error(f"An error occurred while parsing the report: {e}")
         return "Investment thesis could not be extracted due to a formatting error."
 
 # --- Streamlit UI ---
@@ -250,7 +270,6 @@ if ticker_input.strip().upper() != st.session_state.ticker:
 if st.sidebar.button("🚀 Run Full Analysis", type="primary"):
     if st.session_state.ticker:
         st.session_state.final_state = None
-        
         is_consolidated = (data_type_choice == "Consolidated")
         
         inputs = {
@@ -267,6 +286,7 @@ if st.sidebar.button("🚀 Run Full Analysis", type="primary"):
                 placeholders = {
                     "fetch_data": st.empty(),
                     "analysis": st.empty(),
+                    "valuation": st.empty(), # <--- NEW PLACEHOLDER
                     "synthesis": st.empty(),
                     "report": st.empty(),
                 }
@@ -277,15 +297,19 @@ if st.sidebar.button("🚀 Run Full Analysis", type="primary"):
                     for node_name, node_output in event.items():
                         if node_name == "fetch_data":
                             placeholders["fetch_data"].markdown("✅ **Financial Data Downloaded**")
-                            placeholders["analysis"].markdown("⏳ **Performaing Quantitative & Qualitative Analysis...** (in parallel)")
+                            placeholders["analysis"].markdown("⏳ **Quantitative & Qualitative Analysis...**")
                         
                         elif node_name == "quantitative_analysis":
-                            pass # Wait for the other parallel node to finish
+                            pass 
 
                         elif node_name == "qualitative_analysis":
                             placeholders["analysis"].markdown("✅ **Quantitative & Qualitative Analysis Complete**")
-                            placeholders["synthesis"].markdown("⏳ **Generating Final Summary...**")
+                            placeholders["valuation"].markdown("⏳ **Running Valuation & Governance Check...**") # <--- UI UPDATE
                         
+                        elif node_name == "valuation_analysis":
+                             placeholders["valuation"].markdown("✅ **Valuation & Governance Check Complete**") # <--- UI UPDATE
+                             placeholders["synthesis"].markdown("⏳ **Generating Final Summary...**")
+
                         elif node_name == "synthesis":
                              placeholders["synthesis"].markdown("✅ **Final Summary Generated**")
                              placeholders["report"].markdown("⏳ **Creating Final PDF Report...**")
@@ -310,20 +334,17 @@ if st.session_state.final_state:
     final_state = st.session_state.final_state
     st.header(f"Analysis Results for {final_state.get('company_name') or final_state.get('ticker')}", divider="rainbow")
 
-    # --- NEW UI: Show Thesis and Main Download Button ---
     if final_state.get('final_report'):
         st.subheader("📈📝 Investment Thesis")
         investment_thesis = extract_investment_thesis(final_state['final_report'])
         st.markdown(investment_thesis, unsafe_allow_html=True)
     
-    st.markdown("---") # Visual separator
+    st.markdown("---") 
 
     if final_state.get('pdf_report_bytes'):
-        st.info("For a detailed breakdown, including quantitative and qualitative analysis, please download the full report.")
+        st.info("Download full report for charts, logs and deep-dive data.")
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         report_filename = f"Report_{final_state.get('ticker', 'STOCK')}_{timestamp}.pdf"
-        
-        # Center the button
         col1, col2, col3 = st.columns([2, 3, 2])
         with col2:
             st.download_button(
@@ -334,24 +355,34 @@ if st.session_state.final_state:
                 use_container_width=True
             )
 
-    # --- Old UI elements are now in an expander ---
     with st.expander("📂 View Detailed Agent Outputs & Logs", expanded=False):
+        
+        # --- NEW SECTION: Valuation Results ---
+        st.subheader("⚖️ Valuation & Governance Analysis")
+        if final_state.get('valuation_results'):
+             st.markdown(final_state['valuation_results']['content'])
+        else:
+             st.warning("Valuation analysis not available.")
+        # --------------------------------------
+
+        st.markdown("---")
+
+        if final_state.get('peer_data') is not None and not final_state['peer_data'].empty:
+             st.subheader("📊 Raw Peer Data Table")
+             st.dataframe(final_state['peer_data'])
+
         if final_state.get('log_file_content'):
+             st.markdown("### 📜 Execution Logs")
              st.code(final_state['log_file_content'], language='markdown')
         
-        st.subheader("📈 Full Quantitative Insights")
+        st.subheader("📈 Quantitative Insights")
         if final_state.get('quant_text_for_synthesis'):
             st.markdown(final_state['quant_text_for_synthesis'])
-        else:
-            st.markdown("Quantitative analysis was not performed or yielded no text results.")
 
-        st.subheader("📝 Full Qualitative Insights")
+        st.subheader("📝 Qualitative Insights")
         if final_state.get('qualitative_results'):
             qual_results = final_state['qualitative_results']
             for key, value in qual_results.items():
                 st.markdown(f"**{key.replace('_', ' ').title()}:** {value}")
-        else:
-            st.markdown("Qualitative analysis was not performed or yielded no results.")
 else:
     st.info("Enter a stock ticker in the sidebar and click 'Run Full Analysis' to begin.")
-

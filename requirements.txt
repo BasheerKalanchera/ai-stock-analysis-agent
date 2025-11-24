@@ -31,3 +31,6 @@ asyncio
 
 # for colored terminal output
 colorama
+lxml
+
+requests
