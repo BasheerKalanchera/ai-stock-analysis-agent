@@ -104,18 +104,23 @@ def download_financial_data(
     temp_download_dir = os.path.join(os.getcwd(), "temp_downloads")
     os.makedirs(temp_download_dir, exist_ok=True)
 
-    # Basic Prefs (We rely less on these now, but good to keep for Excel)
+    # Basic Prefs
     prefs = {
         "download.default_directory": temp_download_dir,
         "download.prompt_for_download": False,
         "download.directory_upgrade": True,
-        "safebrowsing.enabled": True
+        "safebrowsing.enabled": True,
+        "plugins.always_open_pdf_externally": True # 1. Force PDFs to download in Selenium if needed
     }
     options.add_experimental_option("prefs", prefs)
     options.add_argument("--headless=new") 
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    
+    # 2. Force a standard User Agent to prevent "HeadlessChrome" leakage
+    my_user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    options.add_argument(f'--user-agent={my_user_agent}')
 
     driver = None
     company_name = None
@@ -134,27 +139,35 @@ def download_financial_data(
         
         wait.until(EC.visibility_of_element_located((By.ID, "id_username"))).send_keys(email)
         wait.until(EC.visibility_of_element_located((By.ID, "id_password"))).send_keys(password)
+        # Click login
         driver.find_element(By.XPATH, "//button[@type='submit']").click()
         
         wait.until(EC.presence_of_element_located((By.XPATH, "//input[@placeholder='Search for a company']")))
         logger.info("Login successful.")
 
-        # 2. PREPARE REQUESTS SESSION (Cookie Handoff)
-        # This allows us to download files directly without using the browser's download manager
+        # 3. NAVIGATE TO COMPANY FIRST (To establish history)
+        url = f"https://www.screener.in/company/{ticker}/{'consolidated/' if is_consolidated else ''}"
+        driver.get(url)
+        
+        # 4. PREPARE REQUESTS SESSION (Improved Handoff)
         session = requests.Session()
-        # Transfer user-agent to avoid detection
-        selenium_user_agent = driver.execute_script("return navigator.userAgent;")
-        session.headers.update({"User-Agent": selenium_user_agent})
+        
+        # CRITICAL FIX: Add Referer and standard headers
+        # The server blocks requests that don't appear to come from the company page
+        session.headers.update({
+            "User-Agent": my_user_agent,
+            "Referer": url,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br"
+        })
+        
         # Transfer cookies
         for cookie in driver.get_cookies():
             session.cookies.set(cookie['name'], cookie['value'])
 
-        # 3. NAVIGATE TO COMPANY
-        url = f"https://www.screener.in/company/{ticker}/{'consolidated/' if is_consolidated else ''}"
-        driver.get(url)
-
         try:
-            # --- EXCEL DOWNLOAD (Keep using Selenium for this as it's a dynamic button) ---
+            # --- EXCEL DOWNLOAD ---
             logger.info("Attempting to download Excel file...")
             wait.until(EC.presence_of_element_located((By.ID, "top-ratios")))
             company_name = wait.until(EC.visibility_of_element_located((By.XPATH, "//h1[contains(@class, 'margin-0')]"))).text.strip()
@@ -165,7 +178,6 @@ def download_financial_data(
             try:
                  driver.find_element(By.XPATH, export_xpath).click()
             except:
-                 # Fallback to link if button fails
                  export_link = driver.find_element(By.XPATH, "//a[contains(text(), 'Export to Excel')]")
                  driver.get(export_link.get_attribute('href'))
 
@@ -179,13 +191,16 @@ def download_financial_data(
             if company_name:
                  peer_data = scrape_peers_data(driver)
 
-            # --- TRANSCRIPT DOWNLOADS (Using Requests) ---
+            # --- TRANSCRIPT DOWNLOADS (Updated) ---
             logger.info("Navigating to Documents for Transcripts...")
             driver.get(f"https://www.screener.in/company/{ticker}/#documents/")
-            transcripts_xpath = "//h3[normalize-space()='Concalls']/following::a[contains(@class, 'concall-link') and contains(text(),'Transcript')]"
             
+            # Update Referer to the Documents page specifically
+            session.headers.update({"Referer": driver.current_url})
+
+            transcripts_xpath = "//h3[normalize-space()='Concalls']/following::a[contains(@class, 'concall-link') and contains(text(),'Transcript')]"
             transcript_links = driver.find_elements(By.XPATH, transcripts_xpath)
-            logger.info(f"Found {len(transcript_links)} transcript links. Downloading latest 2 directly...")
+            logger.info(f"Found {len(transcript_links)} transcript links. Downloading latest 2...")
 
             successful_downloads = 0
             for i, link_elem in enumerate(transcript_links):
@@ -193,19 +208,40 @@ def download_financial_data(
                 
                 try:
                     pdf_url = link_elem.get_attribute('href')
-                    logger.info(f"   > Downloading Transcript #{i+1} via Requests...")
+                    logger.info(f"   > Downloading Transcript #{i+1}...")
                     
-                    # DIRECT DOWNLOAD (No browser waiting)
-                    response = session.get(pdf_url, stream=True)
+                    # RETRY LOGIC: Try Requests first, Fallback to Selenium if blocked
+                    try:
+                        response = session.get(pdf_url, stream=True, timeout=15)
+                        response.raise_for_status()
+                        
+                        if 'application/pdf' in response.headers.get('Content-Type', ''):
+                            pdf_buffer = io.BytesIO(response.content)
+                            key = 'latest_transcript' if successful_downloads == 0 else 'previous_transcript'
+                            file_buffers[key] = pdf_buffer
+                            logger.info(f"     ✅ Success via Requests (Size: {len(response.content)/1024:.2f} KB)")
+                            successful_downloads += 1
+                            continue # Skip to next link
+                    except Exception as req_e:
+                        logger.warning(f"     ⚠️ Requests failed ({req_e}). Retrying via Selenium...")
+
+                    # FALLBACK: Use Selenium to download if Requests fails
+                    # This is slower but bypasses the 'RemoteDisconnected' error 100%
+                    files_before_pdf = os.listdir(temp_download_dir)
+                    driver.get(pdf_url)
+                    pdf_filename = wait_for_new_file(temp_download_dir, files_before_pdf, timeout=15)
                     
-                    if response.status_code == 200 and 'application/pdf' in response.headers.get('Content-Type', ''):
-                        pdf_buffer = io.BytesIO(response.content)
+                    if pdf_filename:
+                        with open(os.path.join(temp_download_dir, pdf_filename), 'rb') as f:
+                            pdf_buffer = io.BytesIO(f.read())
                         key = 'latest_transcript' if successful_downloads == 0 else 'previous_transcript'
                         file_buffers[key] = pdf_buffer
-                        logger.info(f"     ✅ Success (Size: {len(response.content)/1024:.2f} KB)")
+                        logger.info(f"     ✅ Success via Selenium Fallback: {pdf_filename}")
                         successful_downloads += 1
+                        # Go back to documents page to reset state for next link find
+                        driver.back() 
                     else:
-                        logger.warning(f"     ❌ Failed: Status {response.status_code} or not a PDF")
+                         logger.warning("     ❌ Failed via Selenium too.")
 
                 except Exception as e:
                     logger.warning(f"     ⚠️ Error downloading PDF: {e}")

@@ -153,12 +153,16 @@ def qualitative_analysis_node(state: StockAnalysisState):
 # --- NEW NODE: VALUATION ANALYSIS ---
 def valuation_analysis_node(state: StockAnalysisState):
     ticker = state['ticker']
+    # 1. Retrieve the Company Name from State
+    company_name = state.get('company_name') 
+    
     peer_data = state.get('peer_data')
     config = state['agent_config']
     log_content_accumulator = state['log_file_content']
     
-    # Run the agent
-    results = run_valuation_analysis(ticker, peer_data, config)
+    # 2. Pass company_name to the agent function
+    # Note: You must update the function signature in valuation_agent.py first!
+    results = run_valuation_analysis(ticker, company_name, peer_data, config)
     
     content = results.get("content", "No valuation analysis generated.")
     
@@ -279,14 +283,16 @@ if st.sidebar.button("🚀 Run Full Analysis", type="primary"):
             "agent_config": agent_configs
         }
         
-        with st.status("Our analysis crew is working on your report...", expanded=True) as status:
+        # 1. Start with the Ticker in the status message
+        initial_msg = f"Our analysis crew is working on the report for {st.session_state.ticker}..."
+        
+        with st.status(initial_msg, expanded=True) as status:
             final_state_result = {}
             try:
-                # --- UI LOGIC FOR LIVE PROGRESS DASHBOARD ---
                 placeholders = {
                     "fetch_data": st.empty(),
                     "analysis": st.empty(),
-                    "valuation": st.empty(), # <--- NEW PLACEHOLDER
+                    "valuation": st.empty(),
                     "synthesis": st.empty(),
                     "report": st.empty(),
                 }
@@ -295,7 +301,16 @@ if st.sidebar.button("🚀 Run Full Analysis", type="primary"):
 
                 for event in app_graph.stream(inputs):
                     for node_name, node_output in event.items():
+                        
                         if node_name == "fetch_data":
+                            # --- NEW LOGIC: Update Status with Company Name ---
+                            c_name = node_output.get("company_name")
+                            if c_name:
+                                new_label = f"Our analysis crew is working on the report for {st.session_state.ticker} ({c_name})..."
+                                status.update(label=new_label)
+                                status.update(label=new_label)
+                            # --------------------------------------------------
+
                             placeholders["fetch_data"].markdown("✅ **Financial Data Downloaded**")
                             placeholders["analysis"].markdown("⏳ **Quantitative & Qualitative Analysis...**")
                         
@@ -304,10 +319,10 @@ if st.sidebar.button("🚀 Run Full Analysis", type="primary"):
 
                         elif node_name == "qualitative_analysis":
                             placeholders["analysis"].markdown("✅ **Quantitative & Qualitative Analysis Complete**")
-                            placeholders["valuation"].markdown("⏳ **Running Valuation & Governance Check...**") # <--- UI UPDATE
+                            placeholders["valuation"].markdown("⏳ **Running Valuation & Governance Check...**")
                         
                         elif node_name == "valuation_analysis":
-                             placeholders["valuation"].markdown("✅ **Valuation & Governance Check Complete**") # <--- UI UPDATE
+                             placeholders["valuation"].markdown("✅ **Valuation & Governance Check Complete**")
                              placeholders["synthesis"].markdown("⏳ **Generating Final Summary...**")
 
                         elif node_name == "synthesis":

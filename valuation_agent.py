@@ -16,12 +16,15 @@ if not logger.handlers:
 logger.propagate = False
 # ---------------------------
 
-def run_valuation_analysis(ticker: str, peer_df: pd.DataFrame, agent_config: dict) -> Dict[str, Any]:
+def run_valuation_analysis(ticker: str, company_name: str, peer_df: pd.DataFrame, agent_config: dict) -> Dict[str, Any]:
     """
     Analyzes the company valuation relative to peers using Gemini.
-    Includes 'Smart Filtering', 'Promoter Pledge', 'PEG Ratio', and 'FCF' checks.
+    
+    UPDATES:
+    - Accepts 'company_name' to accurately find the row in the peer table (Screener uses Names, not Tickers).
+    - Prompt explicitly instructs the LLM to include the target in the comparison table.
     """
-    logger.info(f"--- Starting Valuation Analysis for {ticker} ---")
+    logger.info(f"--- Starting Valuation Analysis for {ticker} ({company_name}) ---")
 
     # 1. Safety Checks
     if peer_df is None or peer_df.empty:
@@ -40,40 +43,41 @@ def run_valuation_analysis(ticker: str, peer_df: pd.DataFrame, agent_config: dic
         model = genai.GenerativeModel(model_name)
         
         # 3. Prepare Data for LLM
-        # Limit to top 15 rows to ensure context fits
+        # Limit to top 15 rows to ensure context fits, but ensure we have enough data
         peer_markdown = peer_df.head(15).to_markdown(index=False)
+        
+        # Fallback: If company_name is None (rare), use ticker, but Name is preferred for table matching.
+        target_identifier = company_name if company_name else ticker
 
         prompt = f"""
-        You are a Valuation Expert. Your goal is to perform a "Relative Valuation Analysis" for **{ticker}**.
+        You are a Valuation Expert. Your goal is to perform a "Relative Valuation Analysis" for the target company: **{target_identifier}** (Ticker: {ticker}).
 
         **Raw Peer Data (from Screener.in):**
         {peer_markdown}
 
-        **CRITICAL INSTRUCTIONS: SMART FILTERING & RISK CHECKS**
+        **CRITICAL INSTRUCTIONS:**
         
-        1. **Identify Direct Competitors:** Select the 3-5 peers from the list that are the *closest* business match to {ticker}. Briefly explain your selection.
+        1. **Identify the Target:** Locate the row in the data that corresponds to **{target_identifier}**. 
+           *Important:* The 'Name' column in the table uses the company name (e.g., "{target_identifier}"), NOT the ticker. Match the name accurately.
         
-        2. **Discard Irrelevant Peers:** Explicitly discard 1-2 companies that are in the same sector but have different business models.
+        2. **Identify Direct Competitors:** Select 3-5 peers from the list that are the *closest* business match to {target_identifier}.
         
-        3. **GOVERNANCE CHECK (Promoter Pledging):**
-           - Find the column "Pledged percentage" (or similar).
-           - **RED FLAG:** If Pledged % > 0%, flag this as a significant governance risk.
-           - **POSITIVE:** If 0%, explicitly mention it as a clean balance sheet sign.
+        3. **Discard Irrelevant Peers:** Explicitly discard companies that are in the same sector but have different business models or are significantly smaller/larger (outliers).
+        
+        4. **GOVERNANCE CHECK (Promoter Pledging):**
+           - Check "Pledged percentage" for **{target_identifier}** and its Peers.
+           - **RED FLAG:** > 0% is a governance risk.
+           - **POSITIVE:** 0% is a clean balance sheet sign.
 
-        4. **VALUATION METRICS (P/E, PEG, FCF):**
-           - Create a comparison table for the *Selected Peers Only*. 
+        5. **VALUATION METRICS TABLE:**
+           - Create a comparison table including **{target_identifier} AND Selected Peers**. 
            - **Required Columns:** Name, CMP, P/E, PEG Ratio, ROCE %, FCF (Last Yr), FCF (Prec Yr).
            
            **Analysis Rules:**
-           - **PEG Ratio:** < 2.0 is "Undervalued" (Growth at Reasonable Price). > 2.0 is likely "Overvalued".
-           - **Free Cash Flow (FCF):** - Look at "Free cash flow last year" AND "Free cash flow preceding year".
-             - **Positive (+FCF)** is preferred and warrants a premium.
-             - **Negative (-FCF)** is a risk factor.
-             - consistency (positive in both years) is the best signal.
+           - **PEG Ratio:** < 2.0 is "Undervalued". > 2.0 is likely "Overvalued".
+           - **Free Cash Flow (FCF):** Look for consistency. Positive FCF is preferred.
 
-        5. **Valuation Verdict:** - Combine P/E, PEG, and FCF data.
-           - *Example:* High P/E but Low PEG + Strong FCF = "Fairly Valued" or "Undervalued" (Quality/Growth).
-           - *Example:* High P/E + Negative FCF = "Overvalued".
+        6. **Valuation Verdict:** - Compare **{target_identifier}** metrics against the average of its Peers.
            - Final Classification: "Undervalued", "Fairly Valued", or "Overvalued".
         
         Format your response in clean Markdown.
