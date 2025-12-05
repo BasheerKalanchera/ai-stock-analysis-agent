@@ -218,13 +218,15 @@ def create_pdf_report(
     story.append(Spacer(1, 12))
 
     # Define TOC links (Anchor Name, Display Text)
+    # UPDATED: Added Investment Thesis as #1 and renumbered others
     toc_items = [
-        ("exec_summary", "1. Executive Summary & Synthesis"),
-        ("valuation", "2. Valuation & Governance Analysis"),
-        ("strategy", "3. Strategic Outlook & Alpha Analysis"),
-        ("quant", "4. Quantitative Financial Analysis"),
-        ("qual", "5. Qualitative & Management Analysis"),
-        ("risk", "6. Risk & Credit Profile")
+        ("thesis", "1. Investment Thesis"),
+        ("exec_summary", "2. Executive Summary & Synthesis"),
+        ("valuation", "3. Valuation & Governance Analysis"),
+        ("strategy", "4. Strategic Outlook & Alpha Analysis"),
+        ("quant", "5. Quantitative Financial Analysis"),
+        ("qual", "6. Qualitative & Management Analysis"),
+        ("risk", "7. Risk & Credit Profile")
     ]
 
     for anchor, title in toc_items:
@@ -234,18 +236,48 @@ def create_pdf_report(
     
     story.append(PageBreak())
 
-    # --- Section 1: EXECUTIVE SUMMARY (Synthesis) ---
+    # --- SPLIT LOGIC: SEPARATE THESIS FROM SUMMARY ---
+    thesis_content = ""
+    summary_content = final_report if final_report else ""
+
     if final_report:
-        # Add Anchor <a name="..."/>
-        header_text = f'<a name="exec_summary"/>{toc_items[0][1]}'
+        # Look for the "Executive Summary" header pattern to split the text.
+        # This regex matches headers like "# Executive Summary", "## 1. Executive Summary", etc.
+        # The split will put everything BEFORE the header into thesis_content, 
+        # and everything AFTER into summary_content.
+        match = re.search(r'(?im)^#+\s*\d*\.?\s*Executive Summary', final_report)
+        
+        if match:
+            split_index = match.start()
+            thesis_content = final_report[:split_index].strip()
+            # We skip the specific header itself because we add our own PDF header below
+            summary_content = final_report[match.end():].strip()
+        elif "Investment Thesis" in final_report and "Executive Summary" in final_report:
+             # Fallback: simple text splitting if regex fails but keywords exist
+             parts = final_report.split("Executive Summary", 1)
+             if len(parts) == 2:
+                 thesis_content = parts[0].replace("#", "").strip()
+                 summary_content = parts[1].strip()
+
+    # --- Section 1: INVESTMENT THESIS ---
+    if thesis_content:
+        header_text = f'<a name="thesis"/>{toc_items[0][1]}'
         story.append(Paragraph(header_text, heading_style))
-        add_content(final_report, body_style)
+        add_content(thesis_content, body_style)
         story.append(HRFlowable(width="100%", thickness=1, color=colors.navy))
         story.append(Spacer(1, 12))
 
-    # --- Section 2: VALUATION ANALYSIS ---
+    # --- Section 2: EXECUTIVE SUMMARY (Synthesis) ---
+    if summary_content:
+        header_text = f'<a name="exec_summary"/>{toc_items[1][1]}'
+        story.append(Paragraph(header_text, heading_style))
+        add_content(summary_content, body_style)
+        story.append(HRFlowable(width="100%", thickness=1, color=colors.navy))
+        story.append(Spacer(1, 12))
+
+    # --- Section 3: VALUATION ANALYSIS ---
     if valuation_results:
-        header_text = f'<a name="valuation"/>{toc_items[1][1]}'
+        header_text = f'<a name="valuation"/>{toc_items[2][1]}'
         story.append(Paragraph(header_text, heading_style))
         
         val_text = ""
@@ -257,16 +289,16 @@ def create_pdf_report(
         add_content(val_text, body_style)
         story.append(Spacer(1, 12))
 
-    # --- Section 3: STRATEGY ANALYSIS ---
+    # --- Section 4: STRATEGY ANALYSIS ---
     if strategy_results:
-        header_text = f'<a name="strategy"/>{toc_items[2][1]}'
+        header_text = f'<a name="strategy"/>{toc_items[3][1]}'
         story.append(Paragraph(header_text, heading_style))
         add_content(strategy_results, body_style)
         story.append(Spacer(1, 12))
 
-    # --- Section 4: QUANTITATIVE ANALYSIS ---
+    # --- Section 5: QUANTITATIVE ANALYSIS ---
     if quant_results:
-        header_text = f'<a name="quant"/>{toc_items[3][1]}'
+        header_text = f'<a name="quant"/>{toc_items[4][1]}'
         story.append(Paragraph(header_text, heading_style))
         if isinstance(quant_results, list):
             for item in quant_results:
@@ -291,9 +323,9 @@ def create_pdf_report(
             add_content(quant_results, body_style)
         story.append(Spacer(1, 12))
 
-    # --- Section 5: QUALITATIVE ANALYSIS ---
+    # --- Section 6: QUALITATIVE ANALYSIS ---
     if qual_results and isinstance(qual_results, dict):
-        header_text = f'<a name="qual"/>{toc_items[4][1]}'
+        header_text = f'<a name="qual"/>{toc_items[5][1]}'
         story.append(Paragraph(header_text, heading_style))
         
         for key, value in qual_results.items():
@@ -330,9 +362,9 @@ def create_pdf_report(
         
         story.append(Spacer(1, 12))
 
-    # --- Section 6: RISK ANALYSIS ---
+    # --- Section 7: RISK ANALYSIS ---
     if risk_results:
-        header_text = f'<a name="risk"/>{toc_items[5][1]}'
+        header_text = f'<a name="risk"/>{toc_items[6][1]}'
         story.append(Paragraph(header_text, heading_style))
         add_content(risk_results, body_style)
         story.append(Spacer(1, 12))
