@@ -29,13 +29,12 @@ def clean_and_format_text(text):
     return text
 
 
-def parse_markdown_table(md_table: str):
-    lines = [l.strip() for l in md_table.strip().split("\n") if l.strip()]
-    if not lines or "|" not in lines[0]:
-        return None
-
+def parse_markdown_table(md_table_lines):
+    """
+    Parses a list of table strings into a list of lists (rows).
+    """
     rows = []
-    for line in lines:
+    for line in md_table_lines:
         # Skip separator lines (e.g., |---|---|)
         if set(line.replace("|", "").strip()) <= set("-:"):
             continue
@@ -51,7 +50,6 @@ def make_pdf_table(rows, body_style, available_width):
     if not rows:
         return None
     
-    # --- Robust Row Cleaning Logic ---
     data = []
     for row in rows:
         new_row = []
@@ -79,7 +77,6 @@ def make_pdf_table(rows, body_style, available_width):
             
             new_row.append(Paragraph(cell_text, body_style))
         data.append(new_row)
-    # --- END FIX ---
 
     # --- Proportional column widths ---
     num_cols = len(rows[0])
@@ -124,15 +121,17 @@ def create_pdf_report(
 ):
     """
     Generates a professional-looking PDF report from ALL analysis results.
-    Order: Executive Summary -> Valuation -> Strategy -> Quant -> Qual -> Risk
+    Includes a Table of Contents and strictly formatting.
     """
     doc = SimpleDocTemplate(file_path, pagesize=letter)
     available_width = doc.width
     styles = getSampleStyleSheet()
 
+    # --- Styles ---
     title_style = ParagraphStyle('Title', parent=styles['h1'], fontName='Helvetica-Bold', fontSize=20, alignment=TA_CENTER, textColor=colors.navy)
     subtitle_style = ParagraphStyle('Subtitle', parent=styles['h2'], fontName='Helvetica', fontSize=12, alignment=TA_CENTER, textColor=colors.black)
     heading_style = ParagraphStyle('Heading2', parent=styles['h2'], fontName='Helvetica-Bold', fontSize=14, spaceBefore=12, spaceAfter=6, textColor=colors.navy)
+    toc_link_style = ParagraphStyle('TOCLink', parent=styles['Normal'], fontName='Helvetica', fontSize=11, spaceAfter=4, textColor=colors.blue)
     sub_heading_style = ParagraphStyle('SubHeading', parent=styles['h3'], fontName='Helvetica-Bold', fontSize=12, spaceBefore=10, spaceAfter=4, textColor=colors.black)
     body_style = ParagraphStyle('BodyText', parent=styles['Normal'], fontName='Helvetica', fontSize=10, alignment=TA_JUSTIFY, spaceAfter=6, leading=14, allowWidows=1, allowOrphans=1, allowBreaks=1)
     bullet_style = ParagraphStyle('Bullet', parent=body_style, firstLineIndent=0, leftIndent=20, spaceBefore=2)
@@ -141,9 +140,10 @@ def create_pdf_report(
 
     def add_content(text, style):
         """
-        Nested function to process all MARKDOWN content (text, bullets, tables).
+        Nested function to process markdown content. 
+        Crucially, it separates Tables from Text if the LLM merges them.
         """
-        # Strip out markdown code block wrappers
+        # Strip code blocks
         text = re.sub(r'```markdown\n', '', str(text), flags=re.IGNORECASE)
         text = text.replace('```', '')
         
@@ -153,17 +153,51 @@ def create_pdf_report(
         for block in blocks:
             if not block.strip():
                 continue
+            
+            lines = block.split('\n')
+            
+            # --- HYBRID PARSER: Detect Tables vs Text ---
+            if "|" in lines[0]: 
+                # Looks like a table start. 
+                # We separate lines that contain '|' (table) from subsequent lines that don't (analysis text).
+                table_lines = []
+                text_lines = []
+                capture_mode = "TABLE"
                 
-            rows = parse_markdown_table(block)
-            if rows:
-                # Handle Markdown Tables
-                tbl = make_pdf_table(rows, body_style, available_width)
-                if tbl:
-                    story.append(tbl)
-                story.append(Spacer(1, 12))
+                for line in lines:
+                    if capture_mode == "TABLE":
+                        if "|" in line:
+                            table_lines.append(line)
+                        else:
+                            # Verify if it's just a separator line or empty
+                            if not line.strip(): 
+                                continue
+                            # Switch to text mode
+                            capture_mode = "TEXT"
+                            text_lines.append(line)
+                    else:
+                        text_lines.append(line)
+                
+                # 1. Render Table
+                if table_lines:
+                    rows = parse_markdown_table(table_lines)
+                    if rows:
+                        tbl = make_pdf_table(rows, body_style, available_width)
+                        if tbl:
+                            story.append(tbl)
+                        story.append(Spacer(1, 12))
+                
+                # 2. Render Leftover Text (The "Analysis" part)
+                for line in text_lines:
+                    if line.strip().startswith('---BULLET---'):
+                        bullet_text = line.replace('---BULLET---', '&bull; ')
+                        story.append(Paragraph(bullet_text, bullet_style))
+                    else:
+                        story.append(Paragraph(line, style))
+
             else:
-                # Handle Prose and Bullets
-                for line in block.split("\n"):
+                # Normal Text Block
+                for line in lines:
                     if not line.strip():
                         continue
                     if line.strip().startswith('---BULLET---'):
@@ -172,21 +206,47 @@ def create_pdf_report(
                     elif line.strip():
                         story.append(Paragraph(line, style))
 
-    # --- 1. Title & Summary ---
+    # --- 0. Title Page ---
     story.append(Paragraph(f"Investment Analysis Report: {company_name or ticker}", title_style))
     story.append(Paragraph(f"Generated on: {datetime.datetime.now().strftime('%d-%B-%Y %H:%M')}", subtitle_style))
     story.append(Spacer(1, 24))
+    story.append(HRFlowable(width="100%", thickness=1, color=colors.navy))
+    story.append(Spacer(1, 24))
+
+    # --- 1. Table of Contents (Clickable) ---
+    story.append(Paragraph("<b>Table of Contents</b>", heading_style))
+    story.append(Spacer(1, 12))
+
+    # Define TOC links (Anchor Name, Display Text)
+    toc_items = [
+        ("exec_summary", "1. Executive Summary & Synthesis"),
+        ("valuation", "2. Valuation & Governance Analysis"),
+        ("strategy", "3. Strategic Outlook & Alpha Analysis"),
+        ("quant", "4. Quantitative Financial Analysis"),
+        ("qual", "5. Qualitative & Management Analysis"),
+        ("risk", "6. Risk & Credit Profile")
+    ]
+
+    for anchor, title in toc_items:
+        # Create a clickable link
+        link_text = f'<a href="#{anchor}" color="blue">{title}</a>'
+        story.append(Paragraph(link_text, toc_link_style))
+    
+    story.append(PageBreak())
 
     # --- Section 1: EXECUTIVE SUMMARY (Synthesis) ---
     if final_report:
-        story.append(Paragraph("1. Executive Summary & Synthesis", heading_style))
+        # Add Anchor <a name="..."/>
+        header_text = f'<a name="exec_summary"/>{toc_items[0][1]}'
+        story.append(Paragraph(header_text, heading_style))
         add_content(final_report, body_style)
         story.append(HRFlowable(width="100%", thickness=1, color=colors.navy))
         story.append(Spacer(1, 12))
 
-    # --- Section 2: VALUATION ANALYSIS (Requested Order #1) ---
+    # --- Section 2: VALUATION ANALYSIS ---
     if valuation_results:
-        story.append(Paragraph("2. Valuation & Governance Analysis", heading_style))
+        header_text = f'<a name="valuation"/>{toc_items[1][1]}'
+        story.append(Paragraph(header_text, heading_style))
         
         val_text = ""
         if isinstance(valuation_results, dict):
@@ -197,15 +257,17 @@ def create_pdf_report(
         add_content(val_text, body_style)
         story.append(Spacer(1, 12))
 
-    # --- Section 3: STRATEGY ANALYSIS (Requested Order #2) ---
+    # --- Section 3: STRATEGY ANALYSIS ---
     if strategy_results:
-        story.append(Paragraph("3. Strategic Outlook & Alpha Analysis", heading_style))
+        header_text = f'<a name="strategy"/>{toc_items[2][1]}'
+        story.append(Paragraph(header_text, heading_style))
         add_content(strategy_results, body_style)
         story.append(Spacer(1, 12))
 
-    # --- Section 4: QUANTITATIVE ANALYSIS (Requested Order #3) ---
+    # --- Section 4: QUANTITATIVE ANALYSIS ---
     if quant_results:
-        story.append(Paragraph("4. Quantitative Financial Analysis", heading_style))
+        header_text = f'<a name="quant"/>{toc_items[3][1]}'
+        story.append(Paragraph(header_text, heading_style))
         if isinstance(quant_results, list):
             for item in quant_results:
                 item_type = item.get("type")
@@ -217,7 +279,7 @@ def create_pdf_report(
                 elif item_type == "chart" and content:
                     try:
                         if isinstance(content, io.BytesIO):
-                            content.seek(0) # Reset pointer
+                            content.seek(0) 
                             story.append(Image(content, width=450, height=250))
                             story.append(Spacer(1, 12))
                         elif isinstance(content, str) and os.path.exists(content):
@@ -229,9 +291,10 @@ def create_pdf_report(
             add_content(quant_results, body_style)
         story.append(Spacer(1, 12))
 
-    # --- Section 5: QUALITATIVE ANALYSIS (Requested Order #4) ---
+    # --- Section 5: QUALITATIVE ANALYSIS ---
     if qual_results and isinstance(qual_results, dict):
-        story.append(Paragraph("5. Qualitative & Management Analysis", heading_style))
+        header_text = f'<a name="qual"/>{toc_items[4][1]}'
+        story.append(Paragraph(header_text, heading_style))
         
         for key, value in qual_results.items():
             if not value:
@@ -241,7 +304,6 @@ def create_pdf_report(
             story.append(Paragraph(section_title, sub_heading_style))
 
             if key == "qoq_comparison":
-                # --- JSON TABLE LOGIC ---
                 try:
                     match = re.search(r'\[.*\]', str(value), re.DOTALL)
                     if match:
@@ -268,9 +330,10 @@ def create_pdf_report(
         
         story.append(Spacer(1, 12))
 
-    # --- Section 6: RISK ANALYSIS (Requested Order #5) ---
+    # --- Section 6: RISK ANALYSIS ---
     if risk_results:
-        story.append(Paragraph("6. Risk & Credit Profile", heading_style))
+        header_text = f'<a name="risk"/>{toc_items[5][1]}'
+        story.append(Paragraph(header_text, heading_style))
         add_content(risk_results, body_style)
         story.append(Spacer(1, 12))
 
