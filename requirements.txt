@@ -12,7 +12,7 @@ google-generativeai
 
 # Web scraping and browser automation
 selenium
-webdriver-manager
+undetected-chromedriver
 
 # Data handling and Excel parsing
 pandas

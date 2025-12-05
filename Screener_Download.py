@@ -6,6 +6,7 @@ from typing import Dict, Optional, Tuple, Any
 import logging
 import pandas as pd
 import requests
+import platform
 
 # --- IMPORTS ---
 import undetected_chromedriver as uc
@@ -68,7 +69,7 @@ def download_financial_data(ticker: str, config: dict, is_consolidated: bool = F
     email = config["SCREENER_EMAIL"]
     password = config["SCREENER_PASSWORD"]
     
-    logger.info("Starting financial data download process (Stealth Mode)...")
+    logger.info("Starting financial data download process...")
     
     options = uc.ChromeOptions()
     temp_download_dir = os.path.join(os.getcwd(), "temp_downloads")
@@ -82,11 +83,21 @@ def download_financial_data(ticker: str, config: dict, is_consolidated: bool = F
         "plugins.always_open_pdf_externally": True
     }
     options.add_experimental_option("prefs", prefs)
-    options.add_argument("--headless=new") 
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument(f'--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+
+    # --- CLOUD / LINUX COMPATIBILITY FIX ---
+    # Check if running on Streamlit Cloud (Linux) or Local
+    if platform.system() == "Linux":
+        logger.info("Detected Linux environment (likely Streamlit Cloud). Setting up Headless Chromium...")
+        options.binary_location = "/usr/bin/chromium" # Default path on Streamlit Cloud
+        options.add_argument("--headless=new") 
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--window-size=1920,1080")
+    else:
+        # Local (Windows/Mac) settings
+        options.add_argument("--headless=new") 
+        options.add_argument("--window-size=1920,1080")
 
     driver = None
     company_name = None
@@ -95,10 +106,20 @@ def download_financial_data(ticker: str, config: dict, is_consolidated: bool = F
 
     try:
         logger.info("Initializing Chrome Driver...")
+        
+        # --- ROBUST DRIVER INITIALIZATION ---
+        # On Cloud, we do NOT use version_main because we can't control the installed chromium version.
         try:
-            driver = uc.Chrome(options=options, use_subprocess=True, version_main=142)
-        except SessionNotCreatedException:
             driver = uc.Chrome(options=options, use_subprocess=True)
+        except Exception as e:
+            logger.warning(f"Standard uc.Chrome failed: {e}. Trying without subprocess...")
+            try:
+                driver = uc.Chrome(options=options)
+            except Exception as e2:
+                # FALLBACK: If undetected-chromedriver fails entirely on cloud, 
+                # you might need to swap to standard Selenium here.
+                logger.error(f"Critical Driver Error: {e2}")
+                raise e2
 
         wait = WebDriverWait(driver, 20)
 
