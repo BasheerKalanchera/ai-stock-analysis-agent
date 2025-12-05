@@ -2,99 +2,69 @@ import io
 import os
 import shutil
 import time
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Any
 import logging
 import pandas as pd
 import requests
 
-# --- UPDATED IMPORTS ---
+# --- IMPORTS ---
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.common.exceptions import TimeoutException, InvalidSelectorException
+from selenium.common.exceptions import TimeoutException, SessionNotCreatedException, StaleElementReferenceException
 
-# --- CUSTOM LOGGER SETUP ---
+# --- LOGGER ---
 logger = logging.getLogger('screener_download')
 logger.setLevel(logging.INFO)
 handler = logging.StreamHandler()
-# Using ⚪ (White Circle) for the Downloader Agent
 formatter = logging.Formatter('%(asctime)s - ⚪ DOWNLOAD - %(message)s')
 handler.setFormatter(formatter)
 
 if not logger.handlers:
     logger.addHandler(handler)
 logger.propagate = False
-# ---------------------------
 
 def wait_for_new_file(download_path: str, files_before: list, timeout: int = 60) -> str | None:
-    """Waits for a new file to appear in the download directory."""
     start_time = time.time()
     while time.time() - start_time < timeout:
         files_after = os.listdir(download_path)
         new_files = [f for f in files_after if f not in files_before and not f.endswith(('.crdownload', '.tmp')) and not f.startswith('.')]
         if new_files:
-            logger.info(f"  > SUCCESS: Downloading '{new_files[0]}'.")
             return new_files[0]
         time.sleep(1)
     return None
 
 def scrape_peers_data(driver) -> pd.DataFrame:
-    """Scrapes the Peers table from the Screener page."""
     try:
         logger.info("Attempting to scrape Peers table...")
-        
         wait = WebDriverWait(driver, 10)
         target_id = "peers-table-placeholder"
-        
         try:
-            # 1. Scroll to the placeholder
             container = wait.until(EC.presence_of_element_located((By.ID, target_id)))
             driver.execute_script("arguments[0].scrollIntoView();", container)
         except TimeoutException:
-            logger.info(f"#{target_id} not found, falling back to generic #peers section...")
             container = wait.until(EC.presence_of_element_located((By.ID, "peers")))
             driver.execute_script("arguments[0].scrollIntoView();", container)
 
-        # 2. Find the table
         table_selector = f"#{target_id} table"
         table_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, table_selector)))
         
-        # 3. Extract and Parse
         html = table_element.get_attribute('outerHTML')
-        
-        # Wrap html string in StringIO to suppress FutureWarning
         dfs = pd.read_html(io.StringIO(html))
         
         if dfs:
             peer_df = dfs[0]
-            
-            # Cleanup
-            if "S.No." in peer_df.columns:
-                peer_df = peer_df.drop(columns=["S.No."])
+            if "S.No." in peer_df.columns: peer_df = peer_df.drop(columns=["S.No."])
             peer_df = peer_df.loc[:, ~peer_df.columns.str.contains('^Unnamed', case=False)]
-            #peer_df = peer_df.fillna("")
-            
-            # --- LOGGING SUCCESS ---
-            logger.info(f"✅ SUCCESS: Scraped Peer Data Table ({len(peer_df)} rows found).")
+            logger.info(f"✅ SUCCESS: Scraped Peer Data Table ({len(peer_df)} rows).")
             return peer_df
-            
     except Exception as e:
         logger.warning(f"Could not scrape Peers table: {e}")
-        if "lxml" in str(e):
-            logger.error("HINT: You are missing the 'lxml' library. Run: pip install lxml")
         return pd.DataFrame()
-    
     return pd.DataFrame()
 
-def download_financial_data(
-    ticker: str,
-    config: dict,
-    is_consolidated: bool = False
-) -> Tuple[Optional[str], Dict[str, io.BytesIO], pd.DataFrame]:
-    """
-    Downloads financial data using Hybrid Method (Selenium for Login + Requests for Files).
-    """
+def download_financial_data(ticker: str, config: dict, is_consolidated: bool = False) -> Tuple[Optional[str], Dict[str, Any], pd.DataFrame]:
     email = config["SCREENER_EMAIL"]
     password = config["SCREENER_PASSWORD"]
     
@@ -104,23 +74,19 @@ def download_financial_data(
     temp_download_dir = os.path.join(os.getcwd(), "temp_downloads")
     os.makedirs(temp_download_dir, exist_ok=True)
 
-    # Basic Prefs
     prefs = {
         "download.default_directory": temp_download_dir,
         "download.prompt_for_download": False,
         "download.directory_upgrade": True,
         "safebrowsing.enabled": True,
-        "plugins.always_open_pdf_externally": True # 1. Force PDFs to download in Selenium if needed
+        "plugins.always_open_pdf_externally": True
     }
     options.add_experimental_option("prefs", prefs)
     options.add_argument("--headless=new") 
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    
-    # 2. Force a standard User Agent to prevent "HeadlessChrome" leakage
-    my_user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    options.add_argument(f'--user-agent={my_user_agent}')
+    options.add_argument(f'--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
 
     driver = None
     company_name = None
@@ -128,58 +94,41 @@ def download_financial_data(
     peer_data = pd.DataFrame()
 
     try:
-        logger.info("Initializing Undetected Chrome Driver...")
-        driver = uc.Chrome(options=options, use_subprocess=True)
+        logger.info("Initializing Chrome Driver...")
+        try:
+            driver = uc.Chrome(options=options, use_subprocess=True, version_main=142)
+        except SessionNotCreatedException:
+            driver = uc.Chrome(options=options, use_subprocess=True)
+
         wait = WebDriverWait(driver, 20)
 
         # 1. LOGIN
-        logger.info("Logging into Screener.in...")
         driver.get("https://www.screener.in/login/")
-        time.sleep(2)
-        
         wait.until(EC.visibility_of_element_located((By.ID, "id_username"))).send_keys(email)
         wait.until(EC.visibility_of_element_located((By.ID, "id_password"))).send_keys(password)
-        # Click login
         driver.find_element(By.XPATH, "//button[@type='submit']").click()
-        
         wait.until(EC.presence_of_element_located((By.XPATH, "//input[@placeholder='Search for a company']")))
         logger.info("Login successful.")
 
-        # 3. NAVIGATE TO COMPANY FIRST (To establish history)
+        # 2. NAVIGATE
         url = f"https://www.screener.in/company/{ticker}/{'consolidated/' if is_consolidated else ''}"
         driver.get(url)
         
-        # 4. PREPARE REQUESTS SESSION (Improved Handoff)
         session = requests.Session()
-        
-        # CRITICAL FIX: Add Referer and standard headers
-        # The server blocks requests that don't appear to come from the company page
-        session.headers.update({
-            "User-Agent": my_user_agent,
-            "Referer": url,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br"
-        })
-        
-        # Transfer cookies
-        for cookie in driver.get_cookies():
-            session.cookies.set(cookie['name'], cookie['value'])
+        session.headers.update({"User-Agent": driver.execute_script("return navigator.userAgent;"), "Referer": url})
+        for cookie in driver.get_cookies(): session.cookies.set(cookie['name'], cookie['value'])
 
         try:
-            # --- EXCEL DOWNLOAD ---
-            logger.info("Attempting to download Excel file...")
+            # --- EXCEL ---
+            logger.info("Downloading Excel...")
             wait.until(EC.presence_of_element_located((By.ID, "top-ratios")))
             company_name = wait.until(EC.visibility_of_element_located((By.XPATH, "//h1[contains(@class, 'margin-0')]"))).text.strip()
 
             files_before = os.listdir(temp_download_dir)
-            export_xpath = "//button[.//span[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'export to excel')]]"
-            
             try:
-                 driver.find_element(By.XPATH, export_xpath).click()
+                 driver.find_element(By.XPATH, "//button[.//span[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'export to excel')]]").click()
             except:
-                 export_link = driver.find_element(By.XPATH, "//a[contains(text(), 'Export to Excel')]")
-                 driver.get(export_link.get_attribute('href'))
+                 driver.get(driver.find_element(By.XPATH, "//a[contains(text(), 'Export to Excel')]").get_attribute('href'))
 
             new_filename = wait_for_new_file(temp_download_dir, files_before)
             if new_filename:
@@ -187,30 +136,148 @@ def download_financial_data(
                     file_buffers['excel'] = io.BytesIO(f.read())
                 logger.info(f"✅ Excel Downloaded: {new_filename}")
 
-            # --- SCRAPE PEERS ---
-            if company_name:
-                 peer_data = scrape_peers_data(driver)
+            if company_name: peer_data = scrape_peers_data(driver)
 
-            # --- TRANSCRIPT DOWNLOADS (Updated) ---
-            logger.info("Navigating to Documents for Transcripts...")
-            driver.get(f"https://www.screener.in/company/{ticker}/#documents/")
+            # --- PPT SEARCH (FIXED) ---
+            logger.info("Scanning for Investor Presentation (PPT)...")
+            driver.get(f"https://www.screener.in/company/{ticker}/#documents")
             
-            # Update Referer to the Documents page specifically
-            session.headers.update({"Referer": driver.current_url})
+            ppt_url = None
+            # Updated XPaths based on your screenshot
+            ppt_xpaths = [
+                "//a[contains(@class, 'concall-link') and contains(text(), 'PPT')]",  # Specific class match
+                "//ul[contains(@class, 'list-links')]//a[contains(text(), 'PPT')]",   # Hierarchy match
+                "//div[contains(@class, 'documents')]//a[contains(text(), 'PPT')]"    # Loose container match
+            ]
 
-            transcripts_xpath = "//h3[normalize-space()='Concalls']/following::a[contains(@class, 'concall-link') and contains(text(),'Transcript')]"
-            transcript_links = driver.find_elements(By.XPATH, transcripts_xpath)
-            logger.info(f"Found {len(transcript_links)} transcript links. Downloading latest 2...")
-
-            successful_downloads = 0
-            for i, link_elem in enumerate(transcript_links):
-                if successful_downloads >= 2: break
-                
+            for xpath in ppt_xpaths:
                 try:
-                    pdf_url = link_elem.get_attribute('href')
+                    ppt_elements = driver.find_elements(By.XPATH, xpath)
+                    if ppt_elements:
+                        ppt_url = ppt_elements[0].get_attribute('href')
+                        logger.info(f"   > Found PPT via XPath: {xpath}")
+                        break
+                except: continue
+
+            if ppt_url:
+                try:
+                    logger.info("   > Downloading PPT...")
+                    r = session.get(ppt_url, stream=True, timeout=30)
+                    r.raise_for_status()
+                    file_buffers['investor_presentation'] = io.BytesIO(r.content)
+                    logger.info(f"     ✅ PPT Downloaded ({len(r.content)/1024/1024:.2f} MB)")
+                except:
+                    # Selenium Fallback
+                    try:
+                        files_before_ppt = os.listdir(temp_download_dir)
+                        driver.get(ppt_url)
+                        ppt_filename = wait_for_new_file(temp_download_dir, files_before_ppt, timeout=40)
+                        if ppt_filename:
+                            with open(os.path.join(temp_download_dir, ppt_filename), 'rb') as f:
+                                file_buffers['investor_presentation'] = io.BytesIO(f.read())
+                            logger.info(f"     ✅ PPT Downloaded via Selenium")
+                            driver.back()
+                    except Exception as e: logger.error(f"     ❌ PPT Failed: {e}")
+            else:
+                logger.info("   > No PPT link found.")
+
+            # --- CREDIT RATINGS LOGIC ---
+            logger.info("Checking for Credit Ratings...")
+            try:
+                header_xpath = "//h3[contains(text(), 'Credit ratings')]"
+                try:
+                    wait.until(EC.presence_of_element_located((By.XPATH, header_xpath)))
+                except TimeoutException:
+                    logger.warning("   > 'Credit ratings' header not found within timeout.")
+
+                rating_links = driver.find_elements(By.XPATH, "//h3[contains(text(), 'Credit ratings')]/..//li//a")
+                
+                if not rating_links:
+                    logger.info("   > Header lookup failed. Trying Agency Keyword Search...")
+                    rating_links = driver.find_elements(By.XPATH, "//section[@id='documents']//a[contains(text(), 'CRISIL') or contains(text(), 'ICRA') or contains(text(), 'CARE') or contains(text(), 'India Ratings')]")
+
+                if rating_links:
+                    latest_rating = rating_links[0] 
+                    rating_url = latest_rating.get_attribute('href')
+                    rating_text = latest_rating.text
+                    logger.info(f"Found Rating Link: {rating_text}")
+
+                    if rating_url.lower().endswith('.pdf'):
+                        logger.info("   > Rating is a PDF. Downloading stream...")
+                        try:
+                            r = session.get(rating_url, stream=True, timeout=15)
+                            r.raise_for_status()
+                            file_buffers['credit_rating_doc'] = io.BytesIO(r.content)
+                            file_buffers['credit_rating_type'] = 'pdf'
+                            logger.info("     ✅ Rating PDF Downloaded.")
+                        except Exception as e:
+                            logger.error(f"Failed to download rating PDF: {e}")
+                    else:
+                        logger.info("   > Rating is a Webpage. Detecting agency...")
+                        
+                        # --- ICRA SPECIAL HANDLING ---
+                        if "icra.in" in rating_url:
+                            logger.info("   > Detected ICRA Page. Attempting to click 'Download' button...")
+                            files_before_rating = os.listdir(temp_download_dir)
+                            driver.get(rating_url)
+                            try:
+                                # Wait for the specific Download Button ID found in screenshot
+                                download_btn = wait.until(EC.element_to_be_clickable((By.ID, "DownloadRatingReport")))
+                                download_btn.click()
+                                
+                                # Wait for PDF to download
+                                rating_filename = wait_for_new_file(temp_download_dir, files_before_rating, timeout=20)
+                                if rating_filename:
+                                    with open(os.path.join(temp_download_dir, rating_filename), 'rb') as f:
+                                        file_buffers['credit_rating_doc'] = io.BytesIO(f.read())
+                                    file_buffers['credit_rating_type'] = 'pdf'
+                                    logger.info(f"     ✅ ICRA PDF Downloaded: {rating_filename}")
+                                else:
+                                    logger.warning("     ❌ ICRA Download Clicked but no file received.")
+                                driver.back()
+                            except Exception as icra_e:
+                                logger.warning(f"     ⚠️ ICRA Download Failed: {icra_e}")
+                                driver.back()
+                        else:
+                            # --- GENERIC WEBPAGE SCRAPE (CRISIL/Others) ---
+                            driver.get(rating_url)
+                            time.sleep(2) 
+                            try:
+                                page_text = driver.find_element(By.TAG_NAME, 'body').text
+                                file_buffers['credit_rating_doc'] = page_text
+                                file_buffers['credit_rating_type'] = 'html'
+                                logger.info(f"     ✅ Rating Text Scraped ({len(page_text)} chars).")
+                                driver.back() 
+                            except Exception as e:
+                                logger.error(f"Failed to scrape rating page: {e}")
+                else:
+                    logger.info("   > No Credit Rating links found.")
+
+            except Exception as e:
+                logger.warning(f"Error processing Credit Ratings: {e}")
+
+            # --- TRANSCRIPTS LOGIC ---
+            logger.info("Scanning for Concall Transcripts...")
+            try:
+                transcripts_xpath = "//h3[normalize-space()='Concalls']/following::a[contains(@class, 'concall-link') and contains(text(),'Transcript')]"
+                transcript_elements = driver.find_elements(By.XPATH, transcripts_xpath)
+                
+                transcript_urls = []
+                for elem in transcript_elements:
+                    try:
+                        transcript_urls.append(elem.get_attribute('href'))
+                    except StaleElementReferenceException:
+                        continue
+                
+                logger.info(f"Found {len(transcript_urls)} transcript links. Downloading latest 2...")
+
+                successful_downloads = 0
+                for i, pdf_url in enumerate(transcript_urls):
+                    if successful_downloads >= 2: break
+                    if not pdf_url: continue
+
                     logger.info(f"   > Downloading Transcript #{i+1}...")
                     
-                    # RETRY LOGIC: Try Requests first, Fallback to Selenium if blocked
                     try:
                         response = session.get(pdf_url, stream=True, timeout=15)
                         response.raise_for_status()
@@ -221,31 +288,32 @@ def download_financial_data(
                             file_buffers[key] = pdf_buffer
                             logger.info(f"     ✅ Success via Requests (Size: {len(response.content)/1024:.2f} KB)")
                             successful_downloads += 1
-                            continue # Skip to next link
+                            continue 
                     except Exception as req_e:
                         logger.warning(f"     ⚠️ Requests failed ({req_e}). Retrying via Selenium...")
 
-                    # FALLBACK: Use Selenium to download if Requests fails
-                    # This is slower but bypasses the 'RemoteDisconnected' error 100%
-                    files_before_pdf = os.listdir(temp_download_dir)
-                    driver.get(pdf_url)
-                    pdf_filename = wait_for_new_file(temp_download_dir, files_before_pdf, timeout=15)
-                    
-                    if pdf_filename:
-                        with open(os.path.join(temp_download_dir, pdf_filename), 'rb') as f:
-                            pdf_buffer = io.BytesIO(f.read())
-                        key = 'latest_transcript' if successful_downloads == 0 else 'previous_transcript'
-                        file_buffers[key] = pdf_buffer
-                        logger.info(f"     ✅ Success via Selenium Fallback: {pdf_filename}")
-                        successful_downloads += 1
-                        # Go back to documents page to reset state for next link find
-                        driver.back() 
-                    else:
-                         logger.warning("     ❌ Failed via Selenium too.")
+                    try:
+                        files_before_pdf = os.listdir(temp_download_dir)
+                        driver.get(pdf_url)
+                        pdf_filename = wait_for_new_file(temp_download_dir, files_before_pdf, timeout=15)
+                        
+                        if pdf_filename:
+                            with open(os.path.join(temp_download_dir, pdf_filename), 'rb') as f:
+                                pdf_buffer = io.BytesIO(f.read())
+                            key = 'latest_transcript' if successful_downloads == 0 else 'previous_transcript'
+                            file_buffers[key] = pdf_buffer
+                            logger.info(f"     ✅ Success via Selenium Fallback: {pdf_filename}")
+                            successful_downloads += 1
+                            driver.back() 
+                        else:
+                            logger.warning("     ❌ Failed via Selenium too.")
+                            driver.back()
+                    except Exception as e:
+                         logger.warning(f"     ⚠️ Selenium download error: {e}")
 
-                except Exception as e:
-                    logger.warning(f"     ⚠️ Error downloading PDF: {e}")
-
+            except Exception as e:
+                logger.warning(f"Error processing Transcripts: {e}")
+            
         except TimeoutException as te:
             logger.warning(f"Timeout on company page: {te}")
 
@@ -259,6 +327,7 @@ def download_financial_data(
                 pass
         if os.path.exists(temp_download_dir):
             shutil.rmtree(temp_download_dir, ignore_errors=True)
+
         logger.info("Cleanup complete.")
 
     return company_name, file_buffers, peer_data

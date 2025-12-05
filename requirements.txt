@@ -21,6 +21,7 @@ openpyxl
 # PDF generation and text extraction
 reportlab
 PyMuPDF
+pypdf
 
 matplotlib
 tabulate
@@ -34,3 +35,5 @@ colorama
 lxml
 
 requests
+beautifulSoup4
+

@@ -93,31 +93,6 @@ def _analyze_with_gemini(prompt: str, analysis_type: str, model_name: str, api_k
     # This line should not be reachable, but as a fallback:
     return f"Could not generate '{analysis_type}' analysis after {max_retries} attempts."
 
-# def _compare_transcripts(latest_text: str, previous_text: str, agent_config: dict) -> str:
-#     """Compare latest and previous transcripts"""
-#     prompt = f"""
-#     You are an expert financial analyst. Your task is to compare and contrast the company's performance based on the two provided earnings conference call transcripts.
-#     Analyze the tone, key metrics, management outlook, and any significant changes or new information between the two quarters.
-#     **Latest Quarter Transcript:**
-#     ---
-#     {latest_text}
-#     ---
-#     **Previous Quarter Transcript:**
-#     ---
-#     {previous_text}
-#     **Your Task:**
-#     Provide a structured comparison in Markdown format. Use bullet points and headers. Focus on:
-#     - **Overall Sentiment Shift:** Did the management tone become more optimistic, cautious, or stay the same?
-#     - **Financial & Operational Highlights:** Compare key performance indicators mentioned in both calls (e.g., revenue growth, margins, order book).
-#     - **Segment Performance:** Note any changes in the performance of different business segments.
-#     - **Outlook & Guidance:** Compare the future outlook or guidance provided in each call.
-#     - **Key Concerns:** Did any concerns from the previous quarter get resolved? Are there any new concerns in the latest quarter?
-#     Directly quote relevant phrases from BOTH transcripts to support your points.
-#     """
-#     return _analyze_with_gemini(prompt, "Quarter-over-Quarter Comparison",
-#                                 agent_config.get("LITE_MODEL_NAME", "gemini-1.5-flash"),
-#                                 agent_config.get("GOOGLE_API_KEY"))
-
 def _compare_transcripts(latest_text: str, previous_text: str, agent_config: dict) -> str:
     """Compare latest and previous transcripts"""
     prompt = f"""
@@ -185,10 +160,24 @@ def _analyze_positives_and_concerns(transcript_text: str, agent_config: dict) ->
                                 agent_config.get("LITE_MODEL_NAME", "gemini-1.5-flash"),
                                 agent_config.get("GOOGLE_API_KEY"))
 
-def _scuttlebutt_sync(company_name: str, agent_config: dict) -> str:
+def _scuttlebutt_sync(company_name: str, context_text: str, agent_config: dict) -> str:
     logger.info("Starting scuttlebutt analysis...")
+    
+    # Add context section if available to ground the analysis
+    context_instruction = ""
+    if context_text and len(context_text) > 10:
+        context_instruction = f"""
+        **COMPANY BACKGROUND & CONTEXT:**
+        Use the following summary to GROUND your research. Ensure the information you find online relates specifically to the company described below.
+        
+        {context_text}
+        """
+
     prompt = f"""
     As a world-class financial analyst following Philip Fisher's "Scuttlebutt" method, conduct a deep investigation into the company: **{company_name}**.
+    
+    {context_instruction}
+
     Your goal is to gather qualitative insights that are not typically found in financial statements. Search for and synthesize the most up-to-date information available as of **September 2025** from a wide range of sources including:
     - Recent news articles, focusing on the period from **late 2024 to the present day**
     - The latest industry reports and forum discussions
@@ -196,12 +185,14 @@ def _scuttlebutt_sync(company_name: str, agent_config: dict) -> str:
     - Recent customer feedback and reviews
     - Management interviews or public statements from **2025**
     - Any recent supply chain or partner commentary
+    
     **Synthesize your findings into a concise report covering these key areas:**
     1.  **Competitive Landscape:** How is the company positioned against its main competitors? What are its key competitive advantages (moat)?
     2.  **Management Quality & Culture:** What is the reputation of the CEO and the senior management team? What is the overall employee morale and company culture like?
     3.  **Customer & Product Perception:** How do customers perceive the company's products or services? Are they seen as innovative, reliable, or a leader in their category?
     4.  **Industry Trends & Headwinds:** What are the major tailwinds (positive trends) and headwinds (challenges) facing the industry and the company?
     5.  **Red Flags:** Are there any potential issues, controversies, or risks that an investor should be aware of?
+    
     Provide a final summary of your overall impression. Use Markdown for formatting.
     """
     return _analyze_with_gemini(prompt, "Scuttlebutt Analysis",
@@ -229,7 +220,9 @@ async def run_qualitative_analysis_async(
     company_name: str, 
     latest_transcript_buffer: io.BytesIO | None, 
     previous_transcript_buffer: io.BytesIO | None,
-    agent_config: dict
+    agent_config: dict,
+    strategy_context: str = "", # New optional arg
+    risk_context: str = ""      # New optional arg
 ) -> Dict[str, Optional[str]]:
     logger.info(f"--- Starting Qualitative Analysis for {company_name} ---")
 
@@ -242,12 +235,19 @@ async def run_qualitative_analysis_async(
 
     logger.info("Kicking off all analysis tasks in parallel...")
 
+    # Combine context for Scuttlebutt grounding
+    combined_context = ""
+    if strategy_context:
+        combined_context += f"--- STRATEGIC CONTEXT ---\n{strategy_context}\n\n"
+    if risk_context:
+        combined_context += f"--- RISK PROFILE CONTEXT ---\n{risk_context}\n\n"
+
     # Kick off Scuttlebutt + SEBI (independent, let them run in background)
     scuttlebutt_future = None
     sebi_future = None
     if company_name:
         scuttlebutt_future = asyncio.create_task(
-            asyncio.to_thread(_scuttlebutt_sync, company_name, agent_config)
+            asyncio.to_thread(_scuttlebutt_sync, company_name, combined_context, agent_config)
         )
         sebi_future = asyncio.create_task(
             asyncio.to_thread(_sebi_sync, company_name, agent_config)
@@ -293,7 +293,19 @@ async def run_qualitative_analysis_async(
 
 
 # Convenience sync wrapper
-def run_qualitative_analysis(company_name, latest_transcript_buffer, previous_transcript_buffer, agent_config):
+def run_qualitative_analysis(
+    company_name, 
+    latest_transcript_buffer, 
+    previous_transcript_buffer, 
+    agent_config,
+    strategy_context="",
+    risk_context=""
+):
     return asyncio.run(run_qualitative_analysis_async(
-        company_name, latest_transcript_buffer, previous_transcript_buffer, agent_config
+        company_name, 
+        latest_transcript_buffer, 
+        previous_transcript_buffer, 
+        agent_config,
+        strategy_context,
+        risk_context
     ))
