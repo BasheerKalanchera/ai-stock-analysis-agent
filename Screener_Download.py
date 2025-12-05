@@ -146,16 +146,49 @@ def download_financial_data(ticker: str, config: dict, is_consolidated: bool = F
             company_name = wait.until(EC.visibility_of_element_located((By.XPATH, "//h1[contains(@class, 'margin-0')]"))).text.strip()
 
             files_before = os.listdir(temp_download_dir)
-            try:
-                 driver.find_element(By.XPATH, "//button[.//span[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'export to excel')]]").click()
-            except:
-                 driver.get(driver.find_element(By.XPATH, "//a[contains(text(), 'Export to Excel')]").get_attribute('href'))
+            
+            # Helper function to attempt click
+            def click_excel_button(d):
+                try:
+                    # Method 1: Button with specific span
+                    d.find_element(By.XPATH, "//button[.//span[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'export to excel')]]").click()
+                    return True
+                except:
+                    try:
+                        # Method 2: Link with text
+                        excel_link = d.find_element(By.XPATH, "//a[contains(text(), 'Export to Excel')]").get_attribute('href')
+                        d.get(excel_link)
+                        return True
+                    except:
+                        return False
 
+            # 1. Attempt Download on Current Page (Consolidated or Standalone)
+            success = click_excel_button(driver)
+
+            # 2. Fallback Logic: If failed AND we are on Consolidated, try Standalone
+            if not success and is_consolidated:
+                logger.warning("   ⚠️ Consolidated Excel not found/clickable. Falling back to Standalone...")
+                try:
+                    # Navigate to Standalone URL
+                    driver.get(f"https://www.screener.in/company/{ticker}/")
+                    wait.until(EC.presence_of_element_located((By.ID, "top-ratios")))
+                    
+                    # Retry Download
+                    if click_excel_button(driver):
+                        logger.info("   ✅ Standalone Excel click successful.")
+                    else:
+                        logger.error("   ❌ Standalone Excel also failed.")
+                except Exception as e:
+                    logger.error(f"   ❌ Fallback navigation failed: {e}")
+
+            # 3. Wait for file to appear
             new_filename = wait_for_new_file(temp_download_dir, files_before)
             if new_filename:
                 with open(os.path.join(temp_download_dir, new_filename), 'rb') as f:
                     file_buffers['excel'] = io.BytesIO(f.read())
                 logger.info(f"✅ Excel Downloaded: {new_filename}")
+            else:
+                logger.warning("❌ Excel file did not appear in download folder.")
 
             if company_name: peer_data = scrape_peers_data(driver)
 
