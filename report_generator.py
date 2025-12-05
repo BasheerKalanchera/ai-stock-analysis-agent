@@ -4,7 +4,7 @@ import argparse
 import os
 import json
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable, Image, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable, Image, Table, TableStyle, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 from reportlab.lib import colors
@@ -19,11 +19,13 @@ def clean_and_format_text(text):
     if not isinstance(text, str):
         text = str(text)
 
+    # Convert headers to bold
     text = re.sub(r'#+\s*(.*?)\n', r'<b>\1</b>\n', text)
+    # Convert bold markers
     text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
     
-    # Use regex to find all bullet variations (*, *, etc.)
-    text = re.sub(r'^\s*\*\s+', '---BULLET---', text, flags=re.MULTILINE)
+    # Use regex to find all bullet variations (*, -, etc.)
+    text = re.sub(r'^\s*[\*\-]\s+', '---BULLET---', text, flags=re.MULTILINE)
     return text
 
 
@@ -34,6 +36,7 @@ def parse_markdown_table(md_table: str):
 
     rows = []
     for line in lines:
+        # Skip separator lines (e.g., |---|---|)
         if set(line.replace("|", "").strip()) <= set("-:"):
             continue
         parts = [c.strip() for c in line.strip("|").split("|")]
@@ -58,8 +61,8 @@ def make_pdf_table(rows, body_style, available_width):
             # 1. Clean **bold**
             cell_text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', cell_text)
             
-            # 2. Convert ALL bullet types (* , * , etc.) to a placeholder
-            cell_text = re.sub(r'^\s*\*\s+', '---BULLET---', cell_text, flags=re.MULTILINE)
+            # 2. Convert ALL bullet types to a placeholder
+            cell_text = re.sub(r'^\s*[\*\-]\s+', '---BULLET---', cell_text, flags=re.MULTILINE)
 
             # 3. Neutralize all newlines from the AI (replace with a space)
             cell_text = cell_text.replace('\n', ' ')
@@ -70,7 +73,7 @@ def make_pdf_table(rows, body_style, available_width):
             # 5. Replace all OTHER bullets with a line break + bullet
             cell_text = cell_text.replace('---BULLET---', '<br/>&bull; ')
             
-            # 6. Final cleanup for parser (handles <br> and stray whitespace)
+            # 6. Final cleanup for parser
             cell_text = cell_text.replace('<br>', '<br/>')
             cell_text = re.sub(r'\s*<br/>\s*', '<br/>', cell_text)
             
@@ -87,7 +90,6 @@ def make_pdf_table(rows, body_style, available_width):
     elif num_cols == 2:
         col_widths = [available_width * 0.30, available_width * 0.70]
     else:
-        # For other tables, just divide the space equally
         col_widths = [available_width / num_cols] * num_cols
 
     table = Table(data, colWidths=col_widths, hAlign="LEFT")
@@ -96,7 +98,7 @@ def make_pdf_table(rows, body_style, available_width):
         ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
         ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'), # Align text to the top of the cell
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'), 
         ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('FONTSIZE', (0, 0), (-1, -1), 8),
@@ -109,9 +111,20 @@ def make_pdf_table(rows, body_style, available_width):
     return table
 
 
-def create_pdf_report(ticker, company_name, quant_results, qual_results, final_report, file_path):
+def create_pdf_report(
+    ticker, 
+    company_name, 
+    quant_results, 
+    qual_results, 
+    strategy_results, 
+    risk_results, 
+    valuation_results, 
+    final_report, 
+    file_path
+):
     """
-    Generates a professional-looking PDF report from the analysis results.
+    Generates a professional-looking PDF report from ALL analysis results.
+    Order: Executive Summary -> Valuation -> Strategy -> Quant -> Qual -> Risk
     """
     doc = SimpleDocTemplate(file_path, pagesize=letter)
     available_width = doc.width
@@ -143,13 +156,13 @@ def create_pdf_report(ticker, company_name, quant_results, qual_results, final_r
                 
             rows = parse_markdown_table(block)
             if rows:
-                # This handles all markdown tables (e.g., from Quant agent)
+                # Handle Markdown Tables
                 tbl = make_pdf_table(rows, body_style, available_width)
                 if tbl:
                     story.append(tbl)
                 story.append(Spacer(1, 12))
             else:
-                # This handles prose and bullets
+                # Handle Prose and Bullets
                 for line in block.split("\n"):
                     if not line.strip():
                         continue
@@ -164,38 +177,61 @@ def create_pdf_report(ticker, company_name, quant_results, qual_results, final_r
     story.append(Paragraph(f"Generated on: {datetime.datetime.now().strftime('%d-%B-%Y %H:%M')}", subtitle_style))
     story.append(Spacer(1, 24))
 
+    # --- Section 1: EXECUTIVE SUMMARY (Synthesis) ---
     if final_report:
-        story.append(Paragraph("Comprehensive Investment Summary", heading_style))
+        story.append(Paragraph("1. Executive Summary & Synthesis", heading_style))
         add_content(final_report, body_style)
         story.append(HRFlowable(width="100%", thickness=1, color=colors.navy))
         story.append(Spacer(1, 12))
 
-    # --- 2. Quantitative Report ---
+    # --- Section 2: VALUATION ANALYSIS (Requested Order #1) ---
+    if valuation_results:
+        story.append(Paragraph("2. Valuation & Governance Analysis", heading_style))
+        
+        val_text = ""
+        if isinstance(valuation_results, dict):
+            val_text = valuation_results.get('content', '')
+        else:
+            val_text = str(valuation_results)
+            
+        add_content(val_text, body_style)
+        story.append(Spacer(1, 12))
+
+    # --- Section 3: STRATEGY ANALYSIS (Requested Order #2) ---
+    if strategy_results:
+        story.append(Paragraph("3. Strategic Outlook & Alpha Analysis", heading_style))
+        add_content(strategy_results, body_style)
+        story.append(Spacer(1, 12))
+
+    # --- Section 4: QUANTITATIVE ANALYSIS (Requested Order #3) ---
     if quant_results:
-        story.append(Paragraph("Detailed Quantitative Analysis Report", heading_style))
+        story.append(Paragraph("4. Quantitative Financial Analysis", heading_style))
         if isinstance(quant_results, list):
             for item in quant_results:
                 item_type = item.get("type")
                 content = item.get("content")
 
                 if item_type == "text" and content:
-                    # Use add_content for all markdown text & tables
                     add_content(content, body_style)
                     story.append(Spacer(1, 6))
                 elif item_type == "chart" and content:
-                    if isinstance(content, io.BytesIO):
-                        story.append(Image(content, width=450, height=250))
-                        story.append(Spacer(1, 12))
-                    elif isinstance(content, str) and os.path.exists(content):
-                        story.append(Image(content, width=450, height=250))
-                        story.append(Spacer(1, 12))
+                    try:
+                        if isinstance(content, io.BytesIO):
+                            content.seek(0) # Reset pointer
+                            story.append(Image(content, width=450, height=250))
+                            story.append(Spacer(1, 12))
+                        elif isinstance(content, str) and os.path.exists(content):
+                            story.append(Image(content, width=450, height=250))
+                            story.append(Spacer(1, 12))
+                    except Exception as e:
+                        story.append(Paragraph(f"<i>[Chart could not be rendered: {str(e)}]</i>", body_style))
         else:
             add_content(quant_results, body_style)
         story.append(Spacer(1, 12))
 
-    # --- 3. Qualitative Report (HYBRID LOGIC) ---
+    # --- Section 5: QUALITATIVE ANALYSIS (Requested Order #4) ---
     if qual_results and isinstance(qual_results, dict):
-        story.append(Paragraph("Detailed Qualitative Analysis Report", heading_style))
+        story.append(Paragraph("5. Qualitative & Management Analysis", heading_style))
         
         for key, value in qual_results.items():
             if not value:
@@ -205,44 +241,40 @@ def create_pdf_report(ticker, company_name, quant_results, qual_results, final_r
             story.append(Paragraph(section_title, sub_heading_style))
 
             if key == "qoq_comparison":
-                # --- NEW JSON LOGIC FOR QOQ TABLE ---
+                # --- JSON TABLE LOGIC ---
                 try:
-                    # NEW: Use regex to find the JSON block and ignore
-                    #      any text before or after it (like the word 'json')
                     match = re.search(r'\[.*\]', str(value), re.DOTALL)
-                    
-                    if not match:
-                        raise Exception("Could not find JSON array '[]' in the text.")
-                    
-                    cleaned_value = match.group(0) # Get only the matched JSON
-                    
-                    # 1. Parse the CLEANED JSON string
-                    parsed_data = json.loads(cleaned_value)
-                    if not parsed_data or not isinstance(parsed_data, list):
-                        raise Exception("Data is not a valid list.")
-
-                    # 2. Build the rows list for the table
-                    rows = []
-                    rows.append(list(parsed_data[0].keys())) 
-                    for item in parsed_data:
-                        rows.append(list(item.values()))
-
-                    # 3. Create and add the table
-                    tbl = make_pdf_table(rows, body_style, available_width)
-                    if tbl:
-                        story.append(tbl)
-                    story.append(Spacer(1, 12))
-                except Exception as e:
-                    story.append(Paragraph(f"<i>Error parsing QoQ JSON: {e}</i>", body_style))
-                    # FALLBACK: Try to parse it as markdown
+                    if match:
+                        cleaned_value = match.group(0)
+                        parsed_data = json.loads(cleaned_value)
+                        if isinstance(parsed_data, list):
+                            rows = []
+                            rows.append(list(parsed_data[0].keys())) 
+                            for item in parsed_data:
+                                rows.append(list(item.values()))
+                            
+                            tbl = make_pdf_table(rows, body_style, available_width)
+                            if tbl:
+                                story.append(tbl)
+                            story.append(Spacer(1, 12))
+                        else:
+                             add_content(str(value), body_style)
+                    else:
+                        add_content(str(value), body_style)
+                except Exception:
                     add_content(str(value), body_style)
             else:
-                # --- OLD MARKDOWN LOGIC (for Scuttlebutt, SEBI, etc.) ---
                 add_content(str(value), body_style)
         
         story.append(Spacer(1, 12))
 
-    # --- 4. Build PDF ---
+    # --- Section 6: RISK ANALYSIS (Requested Order #5) ---
+    if risk_results:
+        story.append(Paragraph("6. Risk & Credit Profile", heading_style))
+        add_content(risk_results, body_style)
+        story.append(Spacer(1, 12))
+
+    # --- Build PDF ---
     try:
         doc.build(story)
         print(f"Successfully created PDF report at: {file_path}")
@@ -251,10 +283,5 @@ def create_pdf_report(ticker, company_name, quant_results, qual_results, final_r
         print(f"Error creating PDF report: {e}")
         return False
 
-def parse_md_report(md_content):
-    # ... (no changes needed here)
-    pass
-
 if __name__ == '__main__':
-    # ... (no changes needed here)
     pass

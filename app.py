@@ -249,6 +249,9 @@ def generate_report_node(state: StockAnalysisState):
         company_name=state.get('company_name'),
         quant_results=state.get('quant_results_structured', []),
         qual_results=state.get('qualitative_results', {}),
+        strategy_results=state.get('strategy_results', ""), # New
+        risk_results=state.get('risk_results', ""),         # New
+        valuation_results=state.get('valuation_results', {}), # New
         final_report=state.get('final_report', "Report could not be fully generated."),
         file_path=pdf_buffer
     )
