@@ -497,10 +497,11 @@ if st.session_state.analysis_results:
                     zf.writestr(filename, state['pdf_report_bytes'])
 
         if has_pdfs:
-            zip_buffer.seek(0)
+            # zip_buffer.seek(0)  <-- No longer strictly needed if using getvalue(), but good practice
+            
             st.download_button(
                 label="📦 **Download All Reports (ZIP)**",
-                data=zip_buffer,
+                data=zip_buffer.getvalue(),  # <--- CRITICAL FIX: Add .getvalue()
                 file_name=f"Batch_Reports_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.zip",
                 mime="application/zip",
                 use_container_width=True,
