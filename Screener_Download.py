@@ -115,6 +115,12 @@ def download_financial_data(ticker: str, config: dict, is_consolidated: bool = F
         # On Cloud, we do NOT use version_main because we can't control the installed chromium version.
         try:
             driver = uc.Chrome(options=options, use_subprocess=True)
+            # --- 🟢 NEW: FORCE DOWNLOAD BEHAVIOR (The Fix) ---
+            # This commands Headless Chrome to allow downloads explicitly
+            driver.execute_cdp_cmd("Page.setDownloadBehavior", {
+                "behavior": "allow",
+                "downloadPath": temp_download_dir
+            })
         except Exception as e:
             logger.warning(f"Standard uc.Chrome failed: {e}. Trying without subprocess...")
             try:
@@ -221,8 +227,8 @@ def download_financial_data(ticker: str, config: dict, is_consolidated: bool = F
                 # --- FIX: CREATE CLEAN HEADERS FOR DOWNLOAD ---
                 # 1. Copy current session headers (which have the User-Agent)
                 download_headers = session.headers.copy()
-                
-                # 2. REMOVE the 'Referer' header. 
+
+                # 2. REMOVE the 'Referer' header.
                 # This tells the server "I pasted this URL directly," bypassing hotlink blocking.
                 if 'Referer' in download_headers:
                     del download_headers['Referer']
@@ -238,39 +244,44 @@ def download_financial_data(ticker: str, config: dict, is_consolidated: bool = F
                 })
 
                 try:
-                    logger.info("   > Downloading PPT (with sanitized headers)...")
-                    # (Your existing requests code here...)
-                    r = requests.get(ppt_url, headers=download_headers, stream=True, timeout=45)
+                    logger.info("   > Attempting download via Requests...")
+                    # 🟢 CHANGE: Reduced timeout to 15s. If it hangs, fail fast.
+                    r = requests.get(ppt_url, headers=download_headers, stream=True, timeout=15)
                     r.raise_for_status()
                     file_buffers['investor_presentation'] = io.BytesIO(r.content)
                     logger.info(f"     ✅ PPT Downloaded via Requests ({len(r.content)/1024/1024:.2f} MB)")
-                    
+
                 except Exception as req_e:
                     logger.warning(f"     ⚠️ Requests failed ({req_e}). Retrying via Selenium...")
-                    
+
                     try:
                         files_before_ppt = os.listdir(temp_download_dir)
-                        
-                        # Trigger navigation
+
+                        # 🟢 Navigate to the PDF URL
                         driver.get(ppt_url)
-                        
-                        # Wait up to 90 seconds for the file to appear
-                        ppt_filename = wait_for_new_file(temp_download_dir, files_before_ppt, timeout=90)
-                        
+
+                        # 🟢 Use the SMART WAIT logic (timeout=60s is enough if the download actually starts)
+                        ppt_filename = wait_for_new_file(temp_download_dir, files_before_ppt, timeout=60)
+
                         if ppt_filename:
-                            with open(os.path.join(temp_download_dir, ppt_filename), 'rb') as f:
+                            full_path = os.path.join(temp_download_dir, ppt_filename)
+                            with open(full_path, 'rb') as f:
                                 file_buffers['investor_presentation'] = io.BytesIO(f.read())
                             logger.info(f"     ✅ PPT Downloaded via Selenium: {ppt_filename}")
                         else:
-                            # --- THIS IS THE MISSING ERROR LOG ---
-                            logger.error("     ❌ Selenium Timeout: PDF did not download within 90s (likely opened in viewer).")
-                        
+                            # If this hits, it means the CDP command in driver setup might be missing
+                            logger.error("     ❌ Selenium Failed: File still did not appear.")
+
                         # Cleanup: Go back to prevent getting stuck on the PDF URL
-                        try:
-                             driver.back()
-                        except: pass
-                            
-                    except Exception as e: 
+                        if len(driver.window_handles) > 1:
+                            driver.close()
+                            driver.switch_to.window(driver.window_handles[0])
+                        else:
+                            try:
+                                driver.back()
+                            except: pass
+
+                    except Exception as e:
                         logger.error(f"     ❌ Selenium Critical Error: {e}")
             else:
                 logger.info("   > No PPT link found.")
