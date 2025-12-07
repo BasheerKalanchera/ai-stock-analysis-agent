@@ -309,7 +309,7 @@ def generate_report_node(state: StockAnalysisState):
     return {"pdf_report_bytes": pdf_buffer.getvalue()}
 
 def delay_node(state: StockAnalysisState):
-    time.sleep(2) 
+    time.sleep(30) 
     return {}
 
 # --- Build the Graph ---
@@ -317,21 +317,21 @@ workflow = StateGraph(StockAnalysisState)
 workflow.add_node("fetch_data", fetch_data_node)
 workflow.add_node("quantitative_analysis", quantitative_analysis_node)
 workflow.add_node("strategy_analysis", strategy_analysis_node)
+workflow.add_node("delay_before_risk", delay_node)
 workflow.add_node("risk_analysis", risk_analysis_node)
 workflow.add_node("qualitative_analysis", qualitative_analysis_node)
 workflow.add_node("valuation_analysis", valuation_analysis_node)
-workflow.add_node("delay_before_synthesis", delay_node)
 workflow.add_node("synthesis", synthesis_node)
 workflow.add_node("generate_report", generate_report_node)
 
 workflow.set_entry_point("fetch_data")
 workflow.add_edge("fetch_data", "quantitative_analysis")
 workflow.add_edge("quantitative_analysis", "strategy_analysis")
-workflow.add_edge("strategy_analysis", "risk_analysis")
+workflow.add_edge("strategy_analysis", "delay_before_risk")
+workflow.add_edge("delay_before_risk", "risk_analysis")
 workflow.add_edge("risk_analysis", "qualitative_analysis")
 workflow.add_edge("qualitative_analysis", "valuation_analysis")
-workflow.add_edge("valuation_analysis", "delay_before_synthesis")
-workflow.add_edge("delay_before_synthesis", "synthesis")
+workflow.add_edge("valuation_analysis", "synthesis")
 workflow.add_edge("synthesis", "generate_report")
 workflow.add_edge("generate_report", END)
 
