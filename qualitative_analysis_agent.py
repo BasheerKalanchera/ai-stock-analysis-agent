@@ -212,7 +212,7 @@ def _sebi_sync(company_name: str, agent_config: dict) -> str:
     Please summarize your findings. If there are notable issues, provide a brief description and, if possible, the year of the event. If no significant violations are found in publicly accessible records, please state that clearly.
     """
     return _analyze_with_gemini(prompt, "SEBI Violations Analysis",
-                                agent_config.get("HEAVY_MODEL_NAME", "gemini-1.5-pro"),
+                                agent_config.get("LITE_MODEL_NAME", "gemini-1.5-pro"),
                                 agent_config.get("GOOGLE_API_KEY"))
 
 # --- Async Orchestrator using asyncio.to_thread ---

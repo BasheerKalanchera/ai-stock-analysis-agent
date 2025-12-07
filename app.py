@@ -201,7 +201,7 @@ def strategy_analysis_node(state: StockAnalysisState):
     
     def strategy_wrapper(f_data, cfg):
         # Uses HEAVY model by default, or FALLBACK if cfg is swapped
-        model_to_use = cfg.get("HEAVY_MODEL_NAME") 
+        model_to_use = cfg.get("LITE_MODEL_NAME") 
         return strategy_analyst_agent(f_data, cfg["GOOGLE_API_KEY"], model_to_use)
 
     result_text = execute_with_fallback(
@@ -217,7 +217,7 @@ def risk_analysis_node(state: StockAnalysisState):
     config = state['agent_config']
     
     def risk_wrapper(f_data, cfg):
-        model_to_use = cfg.get("HEAVY_MODEL_NAME")
+        model_to_use = cfg.get("LITE_MODEL_NAME")
         return risk_analyst_agent(f_data, cfg["GOOGLE_API_KEY"], model_to_use)
 
     result_text = execute_with_fallback(
