@@ -224,65 +224,63 @@ def download_financial_data(ticker: str, config: dict, is_consolidated: bool = F
                 except: continue
 
             if ppt_url:
-                # --- FIX: CREATE CLEAN HEADERS FOR DOWNLOAD ---
-                # 1. Copy current session headers (which have the User-Agent)
+                # 1. Attempt Fast Download (Requests)
+                # We keep this as a 'try' because it works for 90% of sites (like BSE).
                 download_headers = session.headers.copy()
-
-                # 2. REMOVE the 'Referer' header.
-                # This tells the server "I pasted this URL directly," bypassing hotlink blocking.
-                if 'Referer' in download_headers:
-                    del download_headers['Referer']
-
-                # 3. ADD standard browser 'Accept' headers.
-                # NSE and Corporate sites often reject requests without these.
+                # Experiment: Some sites require Referer, some ban it. 
+                # Since 'click' works, we leave headers standard here but rely on the fallback.
                 download_headers.update({
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                    "Accept-Encoding": "gzip, deflate, br",
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Connection": "keep-alive",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     "Upgrade-Insecure-Requests": "1"
                 })
 
                 try:
                     logger.info("   > Attempting download via Requests...")
-                    # 🟢 CHANGE: Reduced timeout to 15s. If it hangs, fail fast.
-                    r = requests.get(ppt_url, headers=download_headers, stream=True, timeout=15)
+                    r = requests.get(ppt_url, headers=download_headers, stream=True, timeout=10) # Reduced to 10s
                     r.raise_for_status()
                     file_buffers['investor_presentation'] = io.BytesIO(r.content)
                     logger.info(f"     ✅ PPT Downloaded via Requests ({len(r.content)/1024/1024:.2f} MB)")
 
                 except Exception as req_e:
-                    logger.warning(f"     ⚠️ Requests failed ({req_e}). Retrying via Selenium...")
+                    logger.warning(f"     ⚠️ Requests blocked/timed out. Switching to 'Natural Click'...")
 
                     try:
                         files_before_ppt = os.listdir(temp_download_dir)
-
-                        # 🟢 Navigate to the PDF URL
-                        driver.get(ppt_url)
-
-                        # 🟢 Use the SMART WAIT logic (timeout=60s is enough if the download actually starts)
+                        
+                        # --- THE FIX: CLICK THE LINK INSTEAD OF VISITING URL ---
+                        # 1. Find the element again using the successful xpath
+                        # (We reuse 'xpath' from the loop variable which is still in scope)
+                        link_element = driver.find_element(By.XPATH, xpath)
+                        
+                        # 2. FORCE OPEN IN SAME TAB
+                        # We remove target="_blank" so we don't have to manage window switching
+                        driver.execute_script("arguments[0].removeAttribute('target');", link_element)
+                        
+                        # 3. JAVASCRIPT CLICK
+                        # This mimics a real user click, sending the correct 'Referer: screener.in'
+                        logger.info("     > Clicking link on page (Bypassing direct nav block)...")
+                        driver.execute_script("arguments[0].click();", link_element)
+                        
+                        # 4. SMART WAIT
                         ppt_filename = wait_for_new_file(temp_download_dir, files_before_ppt, timeout=60)
-
+                        
                         if ppt_filename:
                             full_path = os.path.join(temp_download_dir, ppt_filename)
                             with open(full_path, 'rb') as f:
                                 file_buffers['investor_presentation'] = io.BytesIO(f.read())
-                            logger.info(f"     ✅ PPT Downloaded via Selenium: {ppt_filename}")
+                            logger.info(f"     ✅ PPT Downloaded via Click: {ppt_filename}")
                         else:
-                            # If this hits, it means the CDP command in driver setup might be missing
-                            logger.error("     ❌ Selenium Failed: File still did not appear.")
+                            # Debug: Check if we landed on an error page
+                            current_url = driver.current_url
+                            page_title = driver.title
+                            logger.error(f"     ❌ Selenium Click Failed. Ended up at: {current_url} ({page_title})")
 
-                        # Cleanup: Go back to prevent getting stuck on the PDF URL
-                        if len(driver.window_handles) > 1:
-                            driver.close()
-                            driver.switch_to.window(driver.window_handles[0])
-                        else:
-                            try:
-                                driver.back()
-                            except: pass
-
-                    except Exception as e:
-                        logger.error(f"     ❌ Selenium Critical Error: {e}")
+                        # Return to main page if the click took us away
+                        if driver.current_url != url:
+                            driver.back()
+                            
+                    except Exception as e: 
+                        logger.error(f"     ❌ Selenium Click Error: {e}")
             else:
                 logger.info("   > No PPT link found.")
 
