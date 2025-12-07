@@ -80,7 +80,11 @@ def download_financial_data(ticker: str, config: dict, is_consolidated: bool = F
         "download.prompt_for_download": False,
         "download.directory_upgrade": True,
         "safebrowsing.enabled": True,
-        "plugins.always_open_pdf_externally": True
+        # --- NEW SETTINGS TO FORCE PDF DOWNLOAD ---
+        "plugins.always_open_pdf_externally": True,
+        "pdfjs.disabled": True,
+        "plugins.plugins_list": [{"enabled": False, "name": "Chrome PDF Viewer"}],
+        "download.extensions_to_open": "applications/pdf"
     }
     options.add_experimental_option("prefs", prefs)
 
@@ -235,42 +239,39 @@ def download_financial_data(ticker: str, config: dict, is_consolidated: bool = F
 
                 try:
                     logger.info("   > Downloading PPT (with sanitized headers)...")
-                    
-                    # Pass the custom 'download_headers' here instead of using the session's default
+                    # (Your existing requests code here...)
                     r = requests.get(ppt_url, headers=download_headers, stream=True, timeout=45)
                     r.raise_for_status()
-                    
                     file_buffers['investor_presentation'] = io.BytesIO(r.content)
-                    logger.info(f"     ✅ PPT Downloaded ({len(r.content)/1024/1024:.2f} MB)")
+                    logger.info(f"     ✅ PPT Downloaded via Requests ({len(r.content)/1024/1024:.2f} MB)")
                     
                 except Exception as req_e:
                     logger.warning(f"     ⚠️ Requests failed ({req_e}). Retrying via Selenium...")
                     
-                    # --- SELENIUM FALLBACK IMPROVEMENT ---
                     try:
                         files_before_ppt = os.listdir(temp_download_dir)
                         
-                        # Use JavaScript to open in new tab (often bypasses PDF viewer issues)
-                        driver.execute_script("window.open(arguments[0], '_blank');", ppt_url)
+                        # Trigger navigation
+                        driver.get(ppt_url)
                         
-                        # Switch to new tab to ensure focus
-                        if len(driver.window_handles) > 1:
-                            driver.switch_to.window(driver.window_handles[-1])
-
-                        ppt_filename = wait_for_new_file(temp_download_dir, files_before_ppt, timeout=60)
+                        # Wait up to 90 seconds for the file to appear
+                        ppt_filename = wait_for_new_file(temp_download_dir, files_before_ppt, timeout=90)
                         
                         if ppt_filename:
                             with open(os.path.join(temp_download_dir, ppt_filename), 'rb') as f:
                                 file_buffers['investor_presentation'] = io.BytesIO(f.read())
-                            logger.info(f"     ✅ PPT Downloaded via Selenium")
+                            logger.info(f"     ✅ PPT Downloaded via Selenium: {ppt_filename}")
+                        else:
+                            # --- THIS IS THE MISSING ERROR LOG ---
+                            logger.error("     ❌ Selenium Timeout: PDF did not download within 90s (likely opened in viewer).")
                         
-                        # Close the extra tab
-                        if len(driver.window_handles) > 1:
-                            driver.close()
-                            driver.switch_to.window(driver.window_handles[0])
+                        # Cleanup: Go back to prevent getting stuck on the PDF URL
+                        try:
+                             driver.back()
+                        except: pass
                             
                     except Exception as e: 
-                        logger.error(f"     ❌ PPT Failed: {e}")
+                        logger.error(f"     ❌ Selenium Critical Error: {e}")
             else:
                 logger.info("   > No PPT link found.")
 
