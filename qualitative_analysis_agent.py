@@ -93,10 +93,10 @@ def _analyze_with_gemini(prompt: str, analysis_type: str, model_name: str, api_k
     # This line should not be reachable, but as a fallback:
     return f"Could not generate '{analysis_type}' analysis after {max_retries} attempts."
 
-def _compare_transcripts(latest_text: str, previous_text: str, agent_config: dict) -> str:
-    """Compare latest and previous transcripts"""
+def _compare_transcripts(latest_analysis: str, previous_analysis: str, agent_config: dict) -> str:
+    """Compare latest and previous analyses (inputs are now summaries, not raw text)"""
     prompt = f"""
-    You are an expert financial analyst. Your task is to compare and contrast the company's performance based on the two provided earnings conference call transcripts.
+    You are an expert financial analyst. Your task is to compare the company's performance based on the provided **analysis summaries** of the last two quarters.
 
     **CRITICAL INSTRUCTION:** You **must** generate your response as a single, valid JSON array of objects. Do not include any text, code blocks, or explanations before or after the JSON.
     
@@ -112,13 +112,8 @@ def _compare_transcripts(latest_text: str, previous_text: str, agent_config: dic
     [
       {{
         "Metric": "Overall Sentiment Shift",
-        "Latest Quarter Analysis": "* The tone is cautious, with the MD expressing concerns.\\n* There is a clear emphasis on navigating the US tariff situation.",
-        "Previous Quarter Analysis": "* The tone is generally positive, highlighting strong performance.\\n* Emphasis on positive developments."
-      }},
-      {{
-        "Metric": "Financial & Operational Highlights",
-        "Latest Quarter Analysis": "* Revenue grew 8%.\\n* PBT grew by 18%.",
-        "Previous Quarter Analysis": "* Revenue grew by 15%.\\n* Good net cash position."
+        "Latest Quarter Analysis": "* The tone is cautious.\\n* Focus on cost cutting.",
+        "Previous Quarter Analysis": "* The tone was optimistic.\\n* Focus on expansion."
       }}
     ]
 
@@ -129,14 +124,14 @@ def _compare_transcripts(latest_text: str, previous_text: str, agent_config: dic
     * Outlook & Guidance
     * Key Concerns / New Issues
 
-    **Latest Quarter Transcript:**
+    **Latest Quarter Analysis Summary:**
     ---
-    {latest_text}
+    {latest_analysis}
     ---
 
-    **Previous Quarter Transcript:**
+    **Previous Quarter Analysis Summary:**
     ---
-    {previous_text}
+    {previous_analysis}
     ---
 
     **Your Output (VALID JSON array only):**
@@ -221,8 +216,8 @@ async def run_qualitative_analysis_async(
     latest_transcript_buffer: io.BytesIO | None, 
     previous_transcript_buffer: io.BytesIO | None,
     agent_config: dict,
-    strategy_context: str = "", # New optional arg
-    risk_context: str = ""      # New optional arg
+    strategy_context: str = "", 
+    risk_context: str = ""
 ) -> Dict[str, Optional[str]]:
     logger.info(f"--- Starting Qualitative Analysis for {company_name} ---")
 
@@ -242,7 +237,7 @@ async def run_qualitative_analysis_async(
     if risk_context:
         combined_context += f"--- RISK PROFILE CONTEXT ---\n{risk_context}\n\n"
 
-    # Kick off Scuttlebutt + SEBI (independent, let them run in background)
+    # 1. Kick off Scuttlebutt + SEBI (independent background tasks)
     scuttlebutt_future = None
     sebi_future = None
     if company_name:
@@ -253,36 +248,52 @@ async def run_qualitative_analysis_async(
             asyncio.to_thread(_sebi_sync, company_name, agent_config)
         )
 
-    # Kick off PDF extraction
-    latest_future = None
-    prev_future = None
+    # 2. Kick off PDF extraction
+    latest_text_future = None
+    prev_text_future = None
     if latest_transcript_buffer:
-        latest_future = asyncio.create_task(
+        latest_text_future = asyncio.create_task(
             asyncio.to_thread(_extract_text_from_pdf_buffer, latest_transcript_buffer)
         )
     if previous_transcript_buffer:
-        prev_future = asyncio.create_task(
+        prev_text_future = asyncio.create_task(
             asyncio.to_thread(_extract_text_from_pdf_buffer, previous_transcript_buffer)
         )
 
-    # Wait for transcripts as soon as they are ready
-    latest_text = await latest_future if latest_future else None
-    previous_text = await prev_future if prev_future else None
+    # Wait for transcripts
+    latest_text = await latest_text_future if latest_text_future else None
+    previous_text = await prev_text_future if prev_text_future else None
 
-    # As soon as latest transcript is ready, analyze it
+    # 3. Analyze Transcripts (Map Step)
+    latest_analysis_result = None
+    previous_analysis_result = None
+
+    # Analyze Latest
     if latest_text:
         logger.info("Analyzing latest transcript for positives and concerns...")
-        results["positives_and_concerns"] = await asyncio.to_thread(
+        latest_analysis_result = await asyncio.to_thread(
             _analyze_positives_and_concerns, latest_text, agent_config
         )
+        results["positives_and_concerns"] = latest_analysis_result
 
-        if previous_text:
-            logger.info("Performing QoQ comparison...")
-            results["qoq_comparison"] = await asyncio.to_thread(
-                _compare_transcripts, latest_text, previous_text, agent_config
-            )
+    # Analyze Previous (if it exists)
+    if previous_text:
+        logger.info("Analyzing previous transcript for intermediate summary...")
+        previous_analysis_result = await asyncio.to_thread(
+            _analyze_positives_and_concerns, previous_text, agent_config
+        )
 
-    # Meanwhile, scuttlebutt and sebi keep running in background
+    # 4. Perform QoQ Comparison (Reduce Step)
+    # Now we compare the ANALYSIS RESULTS, not the raw text
+    if latest_analysis_result and previous_analysis_result:
+        logger.info("Performing QoQ comparison using summarized analyses...")
+        results["qoq_comparison"] = await asyncio.to_thread(
+            _compare_transcripts, latest_analysis_result, previous_analysis_result, agent_config
+        )
+    elif latest_analysis_result:
+        logger.warning("Skipping QoQ comparison: Previous transcript analysis missing.")
+    
+    # 5. Gather background tasks
     if scuttlebutt_future:
         results["scuttlebutt"] = await scuttlebutt_future
     if sebi_future:
