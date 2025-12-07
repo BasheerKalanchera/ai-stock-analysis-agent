@@ -223,12 +223,11 @@ def download_financial_data(ticker: str, config: dict, is_consolidated: bool = F
                         break
                 except: continue
 
+            # --- PPT SEARCH & DOWNLOAD (FINAL ROBUST VERSION) ---
             if ppt_url:
                 # 1. Attempt Fast Download (Requests)
-                # We keep this as a 'try' because it works for 90% of sites (like BSE).
                 download_headers = session.headers.copy()
-                # Experiment: Some sites require Referer, some ban it. 
-                # Since 'click' works, we leave headers standard here but rely on the fallback.
+                if 'Referer' in download_headers: del download_headers['Referer']
                 download_headers.update({
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     "Upgrade-Insecure-Requests": "1"
@@ -236,7 +235,7 @@ def download_financial_data(ticker: str, config: dict, is_consolidated: bool = F
 
                 try:
                     logger.info("   > Attempting download via Requests...")
-                    r = requests.get(ppt_url, headers=download_headers, stream=True, timeout=10) # Reduced to 10s
+                    r = requests.get(ppt_url, headers=download_headers, stream=True, timeout=10)
                     r.raise_for_status()
                     file_buffers['investor_presentation'] = io.BytesIO(r.content)
                     logger.info(f"     ✅ PPT Downloaded via Requests ({len(r.content)/1024/1024:.2f} MB)")
@@ -247,40 +246,75 @@ def download_financial_data(ticker: str, config: dict, is_consolidated: bool = F
                     try:
                         files_before_ppt = os.listdir(temp_download_dir)
                         
-                        # --- THE FIX: CLICK THE LINK INSTEAD OF VISITING URL ---
-                        # 1. Find the element again using the successful xpath
-                        # (We reuse 'xpath' from the loop variable which is still in scope)
+                        # --- STEP 1: NATURAL CLICK ---
+                        xpath = ppt_xpaths[0] # Using the first valid xpath found earlier
                         link_element = driver.find_element(By.XPATH, xpath)
-                        
-                        # 2. FORCE OPEN IN SAME TAB
-                        # We remove target="_blank" so we don't have to manage window switching
                         driver.execute_script("arguments[0].removeAttribute('target');", link_element)
-                        
-                        # 3. JAVASCRIPT CLICK
-                        # This mimics a real user click, sending the correct 'Referer: screener.in'
-                        logger.info("     > Clicking link on page (Bypassing direct nav block)...")
+                        logger.info("     > Clicking link on page...")
                         driver.execute_script("arguments[0].click();", link_element)
                         
-                        # 4. SMART WAIT
+                        # --- STEP 2: SMART WAIT ---
                         ppt_filename = wait_for_new_file(temp_download_dir, files_before_ppt, timeout=60)
                         
                         if ppt_filename:
                             full_path = os.path.join(temp_download_dir, ppt_filename)
                             with open(full_path, 'rb') as f:
                                 file_buffers['investor_presentation'] = io.BytesIO(f.read())
-                            logger.info(f"     ✅ PPT Downloaded via Click: {ppt_filename}")
-                        else:
-                            # Debug: Check if we landed on an error page
-                            current_url = driver.current_url
-                            page_title = driver.title
-                            logger.error(f"     ❌ Selenium Click Failed. Ended up at: {current_url} ({page_title})")
-
-                        # Return to main page if the click took us away
-                        if driver.current_url != url:
-                            driver.back()
+                            logger.info(f"     ✅ PPT Downloaded to Disk: {ppt_filename}")
                             
+                            # Return to company page
+                            if driver.current_url != url: driver.back()
+                        
+                        else:
+                            # --- STEP 3: EMERGENCY BLOB FETCH (THE FIX) ---
+                            # If file didn't save, but we are ON the PDF page, grab data via JS
+                            logger.warning("     ⚠️ File not found on disk. Checking if browser is viewing the PDF...")
+                            
+                            if getattr(driver, 'current_url', '').lower().endswith('.pdf'):
+                                logger.info("     > Browser is displaying PDF! Extracting data via JavaScript...")
+                                
+                                # JavaScript to fetch the current page content as a base64 string
+                                js_grab_pdf = """
+                                    var uri = window.location.href;
+                                    var callback = arguments[arguments.length - 1];
+                                    fetch(uri)
+                                        .then(resp => resp.arrayBuffer())
+                                        .then(buffer => {
+                                            var binary = '';
+                                            var bytes = new Uint8Array(buffer);
+                                            var len = bytes.byteLength;
+                                            for (var i = 0; i < len; i++) {
+                                                binary += String.fromCharCode(bytes[i]);
+                                            }
+                                            callback(window.btoa(binary));
+                                        })
+                                        .catch(err => callback('ERROR: ' + err));
+                                """
+                                
+                                try:
+                                    import base64
+                                    # Execute Async Script to handle the fetch promise
+                                    result_b64 = driver.execute_async_script(js_grab_pdf)
+                                    
+                                    if result_b64 and not result_b64.startswith('ERROR'):
+                                        pdf_bytes = base64.b64decode(result_b64)
+                                        file_buffers['investor_presentation'] = io.BytesIO(pdf_bytes)
+                                        logger.info(f"     ✅ PPT Extracted via JS Injection ({len(pdf_bytes)/1024/1024:.2f} MB)")
+                                    else:
+                                        logger.error(f"     ❌ JS Extraction Failed: {result_b64}")
+                                        
+                                except Exception as js_e:
+                                    logger.error(f"     ❌ JS Extraction Crashed: {js_e}")
+                                
+                                # Always go back after grabbing (or failing)
+                                driver.back()
+                            else:
+                                logger.error(f"     ❌ Selenium Failed. Not on PDF URL. Current: {driver.current_url}")
+                                if driver.current_url != url: driver.back()
+
                     except Exception as e: 
-                        logger.error(f"     ❌ Selenium Click Error: {e}")
+                        logger.error(f"     ❌ Selenium Critical Error: {e}")
+                        if driver.current_url != url: driver.back()
             else:
                 logger.info("   > No PPT link found.")
 
