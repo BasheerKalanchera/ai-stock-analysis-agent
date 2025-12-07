@@ -214,24 +214,63 @@ def download_financial_data(ticker: str, config: dict, is_consolidated: bool = F
                 except: continue
 
             if ppt_url:
+                # --- FIX: CREATE CLEAN HEADERS FOR DOWNLOAD ---
+                # 1. Copy current session headers (which have the User-Agent)
+                download_headers = session.headers.copy()
+                
+                # 2. REMOVE the 'Referer' header. 
+                # This tells the server "I pasted this URL directly," bypassing hotlink blocking.
+                if 'Referer' in download_headers:
+                    del download_headers['Referer']
+
+                # 3. ADD standard browser 'Accept' headers.
+                # NSE and Corporate sites often reject requests without these.
+                download_headers.update({
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    "Accept-Encoding": "gzip, deflate, br",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Connection": "keep-alive",
+                    "Upgrade-Insecure-Requests": "1"
+                })
+
                 try:
-                    logger.info("   > Downloading PPT...")
-                    r = session.get(ppt_url, stream=True, timeout=30)
+                    logger.info("   > Downloading PPT (with sanitized headers)...")
+                    
+                    # Pass the custom 'download_headers' here instead of using the session's default
+                    r = requests.get(ppt_url, headers=download_headers, stream=True, timeout=45)
                     r.raise_for_status()
+                    
                     file_buffers['investor_presentation'] = io.BytesIO(r.content)
                     logger.info(f"     ✅ PPT Downloaded ({len(r.content)/1024/1024:.2f} MB)")
-                except:
-                    # Selenium Fallback
+                    
+                except Exception as req_e:
+                    logger.warning(f"     ⚠️ Requests failed ({req_e}). Retrying via Selenium...")
+                    
+                    # --- SELENIUM FALLBACK IMPROVEMENT ---
                     try:
                         files_before_ppt = os.listdir(temp_download_dir)
-                        driver.get(ppt_url)
-                        ppt_filename = wait_for_new_file(temp_download_dir, files_before_ppt, timeout=40)
+                        
+                        # Use JavaScript to open in new tab (often bypasses PDF viewer issues)
+                        driver.execute_script("window.open(arguments[0], '_blank');", ppt_url)
+                        
+                        # Switch to new tab to ensure focus
+                        if len(driver.window_handles) > 1:
+                            driver.switch_to.window(driver.window_handles[-1])
+
+                        ppt_filename = wait_for_new_file(temp_download_dir, files_before_ppt, timeout=60)
+                        
                         if ppt_filename:
                             with open(os.path.join(temp_download_dir, ppt_filename), 'rb') as f:
                                 file_buffers['investor_presentation'] = io.BytesIO(f.read())
                             logger.info(f"     ✅ PPT Downloaded via Selenium")
-                            driver.back()
-                    except Exception as e: logger.error(f"     ❌ PPT Failed: {e}")
+                        
+                        # Close the extra tab
+                        if len(driver.window_handles) > 1:
+                            driver.close()
+                            driver.switch_to.window(driver.window_handles[0])
+                            
+                    except Exception as e: 
+                        logger.error(f"     ❌ PPT Failed: {e}")
             else:
                 logger.info("   > No PPT link found.")
 
