@@ -2,6 +2,10 @@ import logging
 import pandas as pd
 import google.generativeai as genai
 from typing import Dict, Any
+import time
+import random
+import re
+from google.api_core import exceptions as google_exceptions
 
 # --- CUSTOM LOGGER SETUP ---
 logger = logging.getLogger('valuation_agent')
@@ -16,24 +20,52 @@ if not logger.handlers:
 logger.propagate = False
 # ---------------------------
 
+def generate_with_retry(model, prompt, max_retries=3, base_delay=30):
+    """
+    Helper to retry Gemini generation on rate limit errors.
+    Defaults to a 30s wait which is safer for the Free Tier.
+    """
+    for attempt in range(max_retries):
+        try:
+            return model.generate_content(prompt)
+        except (google_exceptions.ResourceExhausted, google_exceptions.TooManyRequests) as e:
+            retry_seconds = base_delay 
+            try:
+                match = re.search(r'retry_delay.*seconds:\s*(\d+)', str(e), re.DOTALL | re.IGNORECASE)
+                if match:
+                    retry_seconds = int(match.group(1)) + 5 
+            except:
+                pass
+
+            if retry_seconds == base_delay:
+                retry_seconds = base_delay + random.uniform(1, 5)
+
+            # CLEAN ONE-LINE LOG
+            logger.warning(f"Generation (Attempt {attempt + 1}/{max_retries}) encountered rate limit - retry after {retry_seconds:.1f} seconds.")
+            time.sleep(retry_seconds)
+            
+        except Exception as e:
+            if "429" in str(e):
+                retry_seconds = base_delay + random.uniform(1, 5)
+                logger.warning(f"Generation (Attempt {attempt + 1}/{max_retries}) encountered generic 429 - retry after {retry_seconds:.1f} seconds.")
+                time.sleep(retry_seconds)
+            else:
+                raise e
+                
+    raise Exception(f"Max retries ({max_retries}) exceeded. The API is too busy.")
+
 def run_valuation_analysis(ticker: str, company_name: str, peer_df: pd.DataFrame, agent_config: dict) -> Dict[str, Any]:
     """
     Analyzes the company valuation relative to peers using Gemini.
-    
-    UPDATES:
-    - Accepts 'company_name' to accurately find the row in the peer table (Screener uses Names, not Tickers).
-    - Prompt explicitly instructs the LLM to include the target in the comparison table.
     """
     logger.info(f"--- Starting Valuation Analysis for {ticker} ({company_name}) ---")
 
-    # 1. Safety Checks
     if peer_df is None or peer_df.empty:
         logger.warning("No peer data provided. Skipping analysis.")
         return {"content": "Valuation analysis skipped: No peer data available."}
 
-    # 2. Setup Gemini
     api_key = agent_config.get("GOOGLE_API_KEY")
-    model_name = agent_config.get("HEAVY_MODEL_NAME", "gemini-2.5-flash") 
+    model_name = agent_config.get("HEAVY_MODEL_NAME", "gemini-2.0-flash") 
     
     if not api_key:
         return {"content": "ERROR: Google API Key missing for Valuation Agent."}
@@ -42,11 +74,7 @@ def run_valuation_analysis(ticker: str, company_name: str, peer_df: pd.DataFrame
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(model_name)
         
-        # 3. Prepare Data for LLM
-        # Limit to top 15 rows to ensure context fits, but ensure we have enough data
         peer_markdown = peer_df.head(15).to_markdown(index=False)
-        
-        # Fallback: If company_name is None (rare), use ticker, but Name is preferred for table matching.
         target_identifier = company_name if company_name else ticker
 
         prompt = f"""
@@ -83,9 +111,8 @@ def run_valuation_analysis(ticker: str, company_name: str, peer_df: pd.DataFrame
         Format your response in clean Markdown.
         """
 
-        # 4. Call LLM
         logger.info(f"Calling Gemini ({model_name}) for valuation...")
-        response = model.generate_content(prompt)
+        response = generate_with_retry(model, prompt)
         logger.info("Valuation Analysis complete.")
         
         return {

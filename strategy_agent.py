@@ -1,5 +1,9 @@
 import logging
+import time
+import random
+import re  # Added for parsing error messages
 import google.generativeai as genai
+from google.api_core import exceptions as google_exceptions
 from pypdf import PdfReader
 
 # Setup Logger
@@ -11,18 +15,49 @@ if not logger.handlers:
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
+def generate_with_retry(model, prompt, max_retries=3, base_delay=30):
+    """
+    Helper to retry Gemini generation on rate limit errors.
+    Defaults to a 30s wait which is safer for the Free Tier.
+    """
+    for attempt in range(max_retries):
+        try:
+            return model.generate_content(prompt)
+        except (google_exceptions.ResourceExhausted, google_exceptions.TooManyRequests) as e:
+            retry_seconds = base_delay 
+            try:
+                match = re.search(r'retry_delay.*seconds:\s*(\d+)', str(e), re.DOTALL | re.IGNORECASE)
+                if match:
+                    retry_seconds = int(match.group(1)) + 5 
+            except:
+                pass
+
+            if retry_seconds == base_delay:
+                retry_seconds = base_delay + random.uniform(1, 5)
+
+            # CLEAN ONE-LINE LOG
+            logger.warning(f"Generation (Attempt {attempt + 1}/{max_retries}) encountered rate limit - retry after {retry_seconds:.1f} seconds.")
+            time.sleep(retry_seconds)
+            
+        except Exception as e:
+            if "429" in str(e):
+                retry_seconds = base_delay + random.uniform(1, 5)
+                logger.warning(f"Generation (Attempt {attempt + 1}/{max_retries}) encountered generic 429 - retry after {retry_seconds:.1f} seconds.")
+                time.sleep(retry_seconds)
+            else:
+                raise e
+                
+    raise Exception(f"Max retries ({max_retries}) exceeded. The API is too busy.")
+
 def strategy_analyst_agent(file_buffers, api_key, model_name):
     """
     Analyzes PPT + Credit Report to produce a 'Universal Alpha' Investment Memo.
-    Adapts to the specific narrative type (Growth, Value, Turnaround, Special Situation).
     """
     logger.info(f"Strategy Agent (Universal Mode) started using model: {model_name}")
     
-    # 1. Check Availability
     if 'investor_presentation' not in file_buffers:
         return "### Strategic Outlook\n\n*No Investor Presentation found. Cannot generate strategic insights.*"
 
-    # 2. Extract PPT Text (The "Pitch")
     ppt_buffer = file_buffers['investor_presentation']
     ppt_text = ""
     try:
@@ -33,7 +68,6 @@ def strategy_analyst_agent(file_buffers, api_key, model_name):
     except Exception as e:
         logger.error(f"PPT Extraction failed: {e}")
 
-    # 3. Extract Credit Report Text (The "Reality Check")
     credit_text = ""
     if 'credit_rating_doc' in file_buffers:
         try:
@@ -47,7 +81,6 @@ def strategy_analyst_agent(file_buffers, api_key, model_name):
         except Exception as e:
             logger.warning(f"Credit Rating extraction failed: {e}")
 
-    # 4. LLM Call - The "Universal Alpha" Prompt
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(model_name) 
@@ -107,7 +140,7 @@ def strategy_analyst_agent(file_buffers, api_key, model_name):
         * **Bear Case:** [The biggest structural risk identified.]
         """
 
-        response = model.generate_content(prompt)
+        response = generate_with_retry(model, prompt)
         logger.info("Analysis complete.")
         return response.text
 

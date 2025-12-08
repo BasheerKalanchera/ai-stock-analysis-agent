@@ -6,6 +6,8 @@ from typing import Optional, Dict
 from functools import lru_cache
 import logging
 import time 
+import re       
+import random   
 from google.api_core import exceptions as google_exceptions
 
 # --- CUSTOM LOGGER SETUP ---
@@ -28,6 +30,30 @@ if not logger.handlers:
 logger.propagate = False
 # --- END CUSTOM LOGGER SETUP ---
 
+# --- HELPER FUNCTIONS ---
+
+def _parse_retry_delay(error_message: str) -> int:
+    """Extracts the recommended retry delay from Gemini error messages."""
+    try:
+        # Regex to find 'retry_delay { seconds: 30 }' or similar patterns
+        match = re.search(r'retry_delay.*seconds:\s*(\d+)', error_message, re.DOTALL | re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    except Exception:
+        pass
+    return 0
+
+def _log_rate_limit(analysis_type: str, attempt: int, wait_time: float, is_generic_429: bool = False):
+    """
+    Centralized helper to log rate limit warnings in a consistent, one-line format.
+    """
+    error_type = "generic 429" if is_generic_429 else "rate limit"
+    logger.warning(f"'{analysis_type}' (Attempt {attempt}) encountered {error_type} - retry after {wait_time:.1f} seconds.")
+
+def _chunk_text(text: str, chunk_size: int = 25000) -> list[str]:
+    """Splits text into chunks of approximately chunk_size characters."""
+    return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+
 # --- Core Functions ---
 
 def _extract_text_from_pdf_buffer(pdf_buffer: io.BytesIO | None) -> str:
@@ -45,8 +71,11 @@ def _extract_text_from_pdf_buffer(pdf_buffer: io.BytesIO | None) -> str:
         return ""
 
 @lru_cache(maxsize=32)
-def _analyze_with_gemini(prompt: str, analysis_type: str, model_name: str, api_key: str) -> str:
-    """Cached version of Gemini API calls that accepts an API key, now with retry logic."""
+def _analyze_with_gemini(prompt: str, analysis_type: str, model_name: str, api_key: str, max_retries: int = 6) -> str:
+    """
+    Cached version of Gemini API calls with robust retry logic.
+    Now accepts 'max_retries' to allow faster failover for specific tasks.
+    """
     if not api_key:
         msg = f"Analysis skipped for '{analysis_type}': Google API Key is not configured."
         logger.warning(msg)
@@ -55,22 +84,30 @@ def _analyze_with_gemini(prompt: str, analysis_type: str, model_name: str, api_k
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(model_name)
     
-    max_retries = 3
-    # Use a 65-second delay to be safe, as the free tier limit is often 1 req/min
-    base_delay_seconds = 65 
+    base_delay_seconds = 30 
 
     for attempt in range(max_retries):
         try:
-            logger.info(f"Calling Gemini for '{analysis_type}' analysis... (Attempt {attempt + 1})")
+            logger.info(f"Calling Gemini for '{analysis_type}' analysis... (Attempt {attempt + 1}/{max_retries})")
             response = model.generate_content(prompt)
             logger.info(f"Finished '{analysis_type}' analysis.")
             return response.text
         
         # Specific catch for 429 Resource Exhausted errors
         except (google_exceptions.ResourceExhausted, google_exceptions.TooManyRequests) as e:
-            logger.warning(f"Rate limit hit for '{analysis_type}': {e}. Waiting {base_delay_seconds}s to retry...")
+            error_str = str(e)
+            api_suggested_wait = _parse_retry_delay(error_str)
+            
+            # Smart Logic: Use API suggestion if available, else use base_delay
+            if api_suggested_wait > 0:
+                wait_time = api_suggested_wait + 5
+            else:
+                wait_time = base_delay_seconds + random.uniform(0, 2) # Add small jitter
+
             if attempt < max_retries - 1:
-                time.sleep(base_delay_seconds)
+                # Use Clean Logging Helper
+                _log_rate_limit(analysis_type, attempt + 1, wait_time, is_generic_429=False)
+                time.sleep(wait_time)
             else:
                 logger.error(f"Final attempt failed for '{analysis_type}'.")
                 return f"Could not generate '{analysis_type}' analysis after {max_retries} attempts. Rate limit exceeded. {str(e)}"
@@ -79,9 +116,13 @@ def _analyze_with_gemini(prompt: str, analysis_type: str, model_name: str, api_k
         except Exception as e:
             # Check if it's a 429 wrapped in a generic exception
             if "429" in str(e):
-                 logger.warning(f"Rate limit (429) detected for '{analysis_type}': {e}. Waiting {base_delay_seconds}s to retry...")
+                 # Default to base delay for generic 429s
+                 wait_time = base_delay_seconds + random.uniform(0, 2)
+                 
                  if attempt < max_retries - 1:
-                    time.sleep(base_delay_seconds)
+                    # Use Clean Logging Helper
+                    _log_rate_limit(analysis_type, attempt + 1, wait_time, is_generic_429=True)
+                    time.sleep(wait_time)
                  else:
                     logger.error(f"Final attempt failed for '{analysis_type}'.")
                     return f"Could not generate '{analysis_type}' analysis after {max_retries} attempts. Rate limit exceeded. {str(e)}"
@@ -141,7 +182,15 @@ def _compare_transcripts(latest_analysis: str, previous_analysis: str, agent_con
                                 agent_config.get("GOOGLE_API_KEY"))
 
 def _analyze_positives_and_concerns(transcript_text: str, agent_config: dict) -> str:
-    """Extract positives and concerns from transcript"""
+    """
+    Two-Phase Analysis Strategy:
+    1. Try Direct Analysis (Preferred): Faster and more accurate. Tries 2 times.
+    2. Fallback to Map-Reduce: Used if Direct Analysis fails (due to Token Limit or Rate Limit).
+    """
+    
+    # --- PHASE 1: DIRECT ATTEMPT ---
+    logger.info(f"Attempting Direct Analysis of transcript ({len(transcript_text)} chars)...")
+    
     prompt = f"""
     Based ONLY on the provided earnings conference call transcript, identify the key positives and areas of concern.
     Structure your answer with two clear headings: "Positives" and "Areas of Concern".
@@ -151,9 +200,79 @@ def _analyze_positives_and_concerns(transcript_text: str, agent_config: dict) ->
     ---
     {transcript_text}
     """
-    return _analyze_with_gemini(prompt, "Positives & Concerns",
-                                agent_config.get("LITE_MODEL_NAME", "gemini-1.5-flash"),
-                                agent_config.get("GOOGLE_API_KEY"))
+    
+    # Try just 2 times. If it fails (likely due to size/rate limits), we move to fallback immediately.
+    direct_result = _analyze_with_gemini(
+        prompt, 
+        "Positives & Concerns (Direct)",
+        agent_config.get("LITE_MODEL_NAME", "gemini-1.5-flash"),
+        agent_config.get("GOOGLE_API_KEY"),
+        max_retries=2 
+    )
+
+    # Check if Direct Attempt Succeeded
+    # If the result contains error keywords, we treat it as a failure
+    if "Could not generate" not in direct_result and "Rate limit exceeded" not in direct_result:
+        return direct_result
+    
+    # --- PHASE 2: FALLBACK TO MAP-REDUCE ---
+    logger.warning("Direct Analysis failed or hit limits. Switching to Map-Reduce Fallback Strategy...")
+    
+    # Split into chunks of ~24k chars (approx 6k tokens)
+    chunks = _chunk_text(transcript_text, chunk_size=24000)
+    chunk_summaries = []
+    
+    # MAP STEP
+    for i, chunk in enumerate(chunks):
+        logger.info(f"Processing Fallback Map Chunk {i+1}/{len(chunks)}...")
+        chunk_prompt = f"""
+        Analyze this PARTIAL SECTION of an earnings call transcript.
+        Extract any key "Positives" (Growth, wins, margin expansion) and "Areas of Concern" (Headwinds, cost pressure, delays).
+        Be concise. If no significant points are found in this section, reply with "No key points".
+        
+        **Transcript Part {i+1}:**
+        ---
+        {chunk}
+        """
+        
+        # We use standard retries (6) for these smaller chunks to ensure they pass
+        summary = _analyze_with_gemini(
+            chunk_prompt, 
+            f"Positives Map Chunk {i+1}",
+            agent_config.get("LITE_MODEL_NAME", "gemini-1.5-flash"),
+            agent_config.get("GOOGLE_API_KEY"),
+            max_retries=6
+        )
+        chunk_summaries.append(summary)
+        
+        # Pacing
+        if i < len(chunks) - 1:
+            time.sleep(5) 
+
+    # REDUCE STEP
+    logger.info("Reducing fallback summaries into final report...")
+    combined_summaries = "\n\n".join(chunk_summaries)
+    
+    final_prompt = f"""
+    You are an expert financial analyst. Below are summaries extracted from different parts of an earnings call transcript.
+    Your task is to consolidate these partial points into one final, coherent report.
+    
+    1. Remove duplicates.
+    2. Merge related points.
+    3. Structure your answer with two clear headings: "Positives" and "Areas of Concern".
+    4. Use bullet points.
+    
+    **Combined Summaries:**
+    ---
+    {combined_summaries}
+    """
+    
+    return _analyze_with_gemini(
+        final_prompt, 
+        "Positives & Concerns (Reduce Step)",
+        agent_config.get("LITE_MODEL_NAME", "gemini-1.5-flash"),
+        agent_config.get("GOOGLE_API_KEY")
+    )
 
 def _scuttlebutt_sync(company_name: str, context_text: str, agent_config: dict) -> str:
     logger.info("Starting scuttlebutt analysis...")
@@ -268,8 +387,10 @@ async def run_qualitative_analysis_async(
     latest_analysis_result = None
     previous_analysis_result = None
 
+    
     # Analyze Latest
     if latest_text:
+        time.sleep(30)
         logger.info("Analyzing latest transcript for positives and concerns...")
         latest_analysis_result = await asyncio.to_thread(
             _analyze_positives_and_concerns, latest_text, agent_config
@@ -278,6 +399,7 @@ async def run_qualitative_analysis_async(
 
     # Analyze Previous (if it exists)
     if previous_text:
+        time.sleep(30)
         logger.info("Analyzing previous transcript for intermediate summary...")
         previous_analysis_result = await asyncio.to_thread(
             _analyze_positives_and_concerns, previous_text, agent_config
@@ -286,6 +408,7 @@ async def run_qualitative_analysis_async(
     # 4. Perform QoQ Comparison (Reduce Step)
     # Now we compare the ANALYSIS RESULTS, not the raw text
     if latest_analysis_result and previous_analysis_result:
+        time.sleep(30)
         logger.info("Performing QoQ comparison using summarized analyses...")
         results["qoq_comparison"] = await asyncio.to_thread(
             _compare_transcripts, latest_analysis_result, previous_analysis_result, agent_config

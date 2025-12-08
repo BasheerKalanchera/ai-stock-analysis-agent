@@ -1,7 +1,11 @@
 import os
 import io
 import logging
+import time
+import random
+import re # Added for parsing error messages
 import google.generativeai as genai
+from google.api_core import exceptions as google_exceptions
 from pypdf import PdfReader  # Requires: pip install pypdf
 
 # Setup Logger
@@ -13,6 +17,40 @@ if not logger.handlers:
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
+def generate_with_retry(model, prompt, max_retries=3, base_delay=30):
+    """
+    Helper to retry Gemini generation on rate limit errors.
+    Defaults to a 30s wait which is safer for the Free Tier.
+    """
+    for attempt in range(max_retries):
+        try:
+            return model.generate_content(prompt)
+        except (google_exceptions.ResourceExhausted, google_exceptions.TooManyRequests) as e:
+            retry_seconds = base_delay 
+            try:
+                match = re.search(r'retry_delay.*seconds:\s*(\d+)', str(e), re.DOTALL | re.IGNORECASE)
+                if match:
+                    retry_seconds = int(match.group(1)) + 5 
+            except:
+                pass
+
+            if retry_seconds == base_delay:
+                retry_seconds = base_delay + random.uniform(1, 5)
+
+            # CLEAN ONE-LINE LOG
+            logger.warning(f"Generation (Attempt {attempt + 1}/{max_retries}) encountered rate limit - retry after {retry_seconds:.1f} seconds.")
+            time.sleep(retry_seconds)
+            
+        except Exception as e:
+            if "429" in str(e):
+                retry_seconds = base_delay + random.uniform(1, 5)
+                logger.warning(f"Generation (Attempt {attempt + 1}/{max_retries}) encountered generic 429 - retry after {retry_seconds:.1f} seconds.")
+                time.sleep(retry_seconds)
+            else:
+                raise e
+                
+    raise Exception(f"Max retries ({max_retries}) exceeded. The API is too busy.")
+
 def extract_text_from_buffer(buffer, file_type):
     """Extracts clean text from BytesIO (PDF) or returns String (HTML)."""
     if file_type == 'html':
@@ -22,7 +60,6 @@ def extract_text_from_buffer(buffer, file_type):
         try:
             reader = PdfReader(buffer)
             text = ""
-            # Read entire PDF
             for page in reader.pages: 
                 text += page.extract_text() + "\n"
             return text
@@ -37,12 +74,10 @@ def risk_analyst_agent(file_buffers, api_key, model_name):
     """
     logger.info(f"Agent started using model: {model_name}")
     
-    # 1. Check Availability
     if 'credit_rating_doc' not in file_buffers:
         logger.info("No credit rating document found. Skipping.")
         return "### Risk Profile\n\n*No Credit Rating data available for this company.*"
 
-    # 2. Extract Text
     doc = file_buffers['credit_rating_doc']
     doc_type = file_buffers.get('credit_rating_type', 'html')
     
@@ -51,13 +86,10 @@ def risk_analyst_agent(file_buffers, api_key, model_name):
     if not raw_text or len(raw_text) < 100:
         return "### Risk Profile\n\n*Credit Rating found, but text extraction failed or file was empty.*"
 
-    # 3. Context Window Management
-    # Using full text as Gemini Flash context window is large enough
     context_text = raw_text
     
     logger.info(f"Analyzing full document ({len(context_text)} characters)...")
 
-    # 4. LLM Call
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(model_name) 
@@ -100,7 +132,7 @@ def risk_analyst_agent(file_buffers, api_key, model_name):
         * [Mention total debt, specific instruments, or key ratios like Debt/Equity or Interest Coverage if detailed in the text]
         """
 
-        response = model.generate_content(prompt)
+        response = generate_with_retry(model, prompt)
         logger.info("Analysis complete.")
         return response.text
 
