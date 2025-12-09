@@ -395,7 +395,7 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                 placeholders["risk"].markdown("⏳ **Analyzing Risk...**")
             elif node_name == "risk_analysis":
                 placeholders["risk"].markdown("✅ **Risk Analysis Complete**")
-                placeholders["qual"].markdown("⏳ **Running Scuttlebutt...**")
+                placeholders["qual"].markdown("⏳ **Running Qualitative Analysis...**")
             elif node_name == "qualitative_analysis":
                 placeholders["qual"].markdown("✅ **Qualitative Analysis Complete**")
                 placeholders["valuation"].markdown("⏳ **Running Valuation...**")
