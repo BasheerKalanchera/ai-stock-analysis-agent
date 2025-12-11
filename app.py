@@ -30,40 +30,47 @@ st.set_page_config(page_title="AI Stock Analysis Crew", page_icon="🤖", layout
 load_dotenv()
 
 # --- CENTRALIZED SECRET & CONFIGURATION HANDLING ---
-agent_configs = {}
+
+def get_secret(key, default=None):
+    """
+    Safely retrieves config from st.secrets (Cloud) or os.getenv (Local).
+    Silences Pylance errors and handles missing local secrets.toml files.
+    """
+    try:
+        # Try finding the key in Streamlit secrets first
+        # We use .get() to avoid KeyError if the key is missing in the file
+        return st.secrets.get(key, os.getenv(key, default))
+    except (FileNotFoundError, KeyError, st.errors.StreamlitAPIException):
+        # If secrets.toml doesn't exist (Local) or any other read error,
+        # fallback strictly to .env
+        return os.getenv(key, default)
+
+# Determine environment status safely
+is_cloud_env = False
 try:
-    agent_configs = {
-        "SCREENER_EMAIL": st.secrets["SCREENER_EMAIL"],
-        "SCREENER_PASSWORD": st.secrets["SCREENER_PASSWORD"],
-        "GOOGLE_API_KEY": st.secrets["GOOGLE_API_KEY"],
-        
-        # --- MODEL CONFIGURATION ---
-        # 1. Primary Workhorse (Fast, Cheap)
-        "LITE_MODEL_NAME": st.secrets.get("LITE_MODEL_NAME", "gemini-2.5-flash-lite"),
-        
-        # 2. Smart Reasoner (Strategy/Risk)
-        "HEAVY_MODEL_NAME": st.secrets.get("HEAVY_MODEL_NAME", "gemini-2.5-flash"),
-        
-        # 3. FALLBACK: High Volume (For Daily Request Limits / RPD)
-        "FALLBACK_REQUEST_MODEL": "gemini-2.5-flash-lite", 
-        
-        # 4. FALLBACK: High Capacity (For Token Limits / TPM)
-        "FALLBACK_TOKEN_MODEL": "gemini-2.0-flash",
-        
-        "IS_CLOUD_ENV": True
-    }
-except (st.errors.StreamlitAPIException, KeyError):
-    # Local fallback
-    agent_configs = {
-        "SCREENER_EMAIL": os.getenv("SCREENER_EMAIL"),
-        "SCREENER_PASSWORD": os.getenv("SCREENER_PASSWORD"),
-        "GOOGLE_API_KEY": os.getenv("GOOGLE_API_KEY"),
-        "LITE_MODEL_NAME": os.getenv("LITE_MODEL_NAME", "gemini-2.5-flash-lite"),
-        "HEAVY_MODEL_NAME": os.getenv("HEAVY_MODEL_NAME", "gemini-2.5-flash"),
-        "FALLBACK_REQUEST_MODEL": "gemini-2.5-flash-lite", 
-        "FALLBACK_TOKEN_MODEL": "gemini-2.0-flash",
-        "IS_CLOUD_ENV": False
-    }
+    # Just checking existence prevents crash, but confirms if secrets are loaded
+    if st.secrets: 
+        is_cloud_env = True
+except (FileNotFoundError, st.errors.StreamlitAPIException):
+    is_cloud_env = False
+
+agent_configs = {
+    "SCREENER_EMAIL": get_secret("SCREENER_EMAIL"),
+    "SCREENER_PASSWORD": get_secret("SCREENER_PASSWORD"),
+    "GOOGLE_API_KEY": get_secret("GOOGLE_API_KEY"),
+    
+    # --- MODEL CONFIGURATION ---
+    "LITE_MODEL_NAME": get_secret("LITE_MODEL_NAME", "gemini-2.5-flash-lite"),
+    "HEAVY_MODEL_NAME": get_secret("HEAVY_MODEL_NAME", "gemini-2.5-flash"),
+    
+    # 3. FALLBACK: High Volume (For Daily Request Limits / RPD)
+    "FALLBACK_REQUEST_MODEL": "gemini-2.5-flash-lite", 
+    
+    # 4. FALLBACK: High Capacity (For Token Limits / TPM)
+    "FALLBACK_TOKEN_MODEL": "gemini-2.0-flash",
+    
+    "IS_CLOUD_ENV": is_cloud_env
+}
 
 # --- RESILIENCE LOGIC: THE SMART FALLBACK WRAPPER ---
 def execute_with_fallback(func, log_accumulator, agent_name, *args, **kwargs):
@@ -119,7 +126,6 @@ def execute_with_fallback(func, log_accumulator, agent_name, *args, **kwargs):
             
             try:
                 # ATTEMPT 2: Run with Fallback Config
-                # We can return a special note in the UI or Logs if needed, but here we just retry
                 return func(*tuple(new_args), **kwargs)
             except Exception as e2:
                 # If even the fallback fails, return a safe failure string
@@ -147,7 +153,9 @@ class StockAnalysisState(TypedDict):
     is_consolidated: bool | None
     agent_config: Dict[str, Any]
 
-# --- Agent Nodes (Wrapped for Resilience) ---
+# ==============================================================================
+# 1. FULL WORKFLOW NODES (Original)
+# ==============================================================================
 
 def fetch_data_node(state: StockAnalysisState):
     ticker = state['ticker']
@@ -155,6 +163,7 @@ def fetch_data_node(state: StockAnalysisState):
     config = state['agent_config']
     log_content_accumulator = state.get('log_file_content', "")
 
+    # Default call (gets everything)
     company_name, file_data, peer_data = download_financial_data(ticker, config, is_consolidated)
     
     timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -312,32 +321,103 @@ def delay_node(state: StockAnalysisState):
     time.sleep(30) 
     return {}
 
-# --- Build the Graph ---
-workflow = StateGraph(StockAnalysisState)
-workflow.add_node("fetch_data", fetch_data_node)
-workflow.add_node("quantitative_analysis", quantitative_analysis_node)
-workflow.add_node("delay_before_strategy", delay_node)
-workflow.add_node("strategy_analysis", strategy_analysis_node)
-workflow.add_node("delay_before_risk", delay_node)
-workflow.add_node("risk_analysis", risk_analysis_node)
-workflow.add_node("qualitative_analysis", qualitative_analysis_node)
-workflow.add_node("valuation_analysis", valuation_analysis_node)
-workflow.add_node("synthesis", synthesis_node)
-workflow.add_node("generate_report", generate_report_node)
+# ==============================================================================
+# 2. NEW NODES FOR PHASE 0.5 (Risk Only)
+# ==============================================================================
 
-workflow.set_entry_point("fetch_data")
-workflow.add_edge("fetch_data", "quantitative_analysis")
-workflow.add_edge("quantitative_analysis", "strategy_analysis")
-#workflow.add_edge("delay_before_strategy", "strategy_analysis")
-workflow.add_edge("strategy_analysis", "risk_analysis")
-#workflow.add_edge("delay_before_risk", "risk_analysis")
-workflow.add_edge("risk_analysis", "qualitative_analysis")
-workflow.add_edge("qualitative_analysis", "valuation_analysis")
-workflow.add_edge("valuation_analysis", "synthesis")
-workflow.add_edge("synthesis", "generate_report")
-workflow.add_edge("generate_report", END)
+def screener_for_risk_node(state: StockAnalysisState):
+    """
+    Downloads ONLY what is needed for Risk Analysis (Credit Report).
+    Optimized to save time and bandwidth.
+    """
+    ticker = state['ticker']
+    is_consolidated = state['is_consolidated']
+    config = state['agent_config']
+    log_content_accumulator = state.get('log_file_content', "")
 
-app_graph = workflow.compile()
+    # Phase 0.5 Flag Usage
+    company_name, file_data, peer_data = download_financial_data(
+        ticker, 
+        config, 
+        is_consolidated,
+        need_excel=False,
+        need_transcripts=False,
+        need_ppt=False,
+        need_peers=False,
+        need_credit_report=True 
+    )
+    
+    timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    log_entry = (f"## PHASE 0.5: RISK DOWNLOAD for {company_name or ticker}\n\n"
+                 f"**Timestamp**: {timestamp_str}\n\n"
+                 f"**Credit Rating Doc**: {'Downloaded' if file_data.get('credit_rating_doc') else 'Failed/Not Found'}\n---\n")
+    
+    log_content_accumulator += log_entry
+        
+    return {"company_name": company_name, "file_data": file_data, "log_file_content": log_content_accumulator}
+
+def isolated_risk_node(state: StockAnalysisState):
+    """
+    Runs the Risk Agent in isolation.
+    """
+    log_content_accumulator = state['log_file_content']
+    config = state['agent_config']
+    
+    def risk_wrapper(f_data, cfg):
+        model_to_use = cfg.get("LITE_MODEL_NAME")
+        return risk_analyst_agent(f_data, cfg["GOOGLE_API_KEY"], model_to_use)
+
+    result_text = execute_with_fallback(
+        risk_wrapper, log_content_accumulator, "Risk (Isolated)",
+        state['file_data'], config
+    )
+
+    log_content_accumulator += f"## PHASE 0.5: ISOLATED RISK ANALYSIS\n\n{result_text}\n\n---\n\n"
+    return {"risk_results": result_text, "log_file_content": log_content_accumulator}
+
+
+# ==============================================================================
+# 3. BUILD GRAPHS
+# ==============================================================================
+
+# --- A. FULL WORKFLOW GRAPH (Original) ---
+full_workflow = StateGraph(StockAnalysisState)
+full_workflow.add_node("fetch_data", fetch_data_node)
+full_workflow.add_node("quantitative_analysis", quantitative_analysis_node)
+full_workflow.add_node("delay_before_strategy", delay_node)
+full_workflow.add_node("strategy_analysis", strategy_analysis_node)
+full_workflow.add_node("delay_before_risk", delay_node)
+full_workflow.add_node("risk_analysis", risk_analysis_node)
+full_workflow.add_node("qualitative_analysis", qualitative_analysis_node)
+full_workflow.add_node("valuation_analysis", valuation_analysis_node)
+full_workflow.add_node("synthesis", synthesis_node)
+full_workflow.add_node("generate_report", generate_report_node)
+
+full_workflow.set_entry_point("fetch_data")
+full_workflow.add_edge("fetch_data", "quantitative_analysis")
+full_workflow.add_edge("quantitative_analysis", "strategy_analysis")
+# workflow.add_edge("delay_before_strategy", "strategy_analysis")
+full_workflow.add_edge("strategy_analysis", "risk_analysis")
+# workflow.add_edge("delay_before_risk", "risk_analysis")
+full_workflow.add_edge("risk_analysis", "qualitative_analysis")
+full_workflow.add_edge("qualitative_analysis", "valuation_analysis")
+full_workflow.add_edge("valuation_analysis", "synthesis")
+full_workflow.add_edge("synthesis", "generate_report")
+full_workflow.add_edge("generate_report", END)
+
+app_graph = full_workflow.compile()
+
+# --- B. RISK ONLY GRAPH (Phase 0.5) ---
+risk_workflow = StateGraph(StockAnalysisState)
+risk_workflow.add_node("screener_for_risk", screener_for_risk_node)
+risk_workflow.add_node("isolated_risk", isolated_risk_node)
+
+risk_workflow.set_entry_point("screener_for_risk")
+risk_workflow.add_edge("screener_for_risk", "isolated_risk")
+risk_workflow.add_edge("isolated_risk", END)
+
+risk_only_graph = risk_workflow.compile()
+
 
 # --- Helper Function for UI ---
 def extract_investment_thesis(full_report: str) -> str:
@@ -353,59 +433,81 @@ def extract_investment_thesis(full_report: str) -> str:
     except Exception:
         return "Investment thesis could not be extracted."
 
-# --- Single Ticker Runner ---
-def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_container, progress_text_container):
+# --- Runner Function (Updated for Multi-Mode) ---
+def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_container, progress_text_container, workflow_mode):
     inputs = {
         "ticker": ticker_symbol,
-        "log_file_content": f"# Analysis Log for {ticker_symbol}\n\n",
+        "log_file_content": f"# Analysis Log for {ticker_symbol} (Mode: {workflow_mode})\n\n",
         "is_consolidated": is_consolidated_flag,
         "agent_config": agent_configs
     }
     
     final_state_result = {}
-    placeholders = {
-        "fetch_data": status_container.empty(),
-        "quant": status_container.empty(),
-        "strategy": status_container.empty(),
-        "risk": status_container.empty(),
-        "qual": status_container.empty(),
-        "valuation": status_container.empty(),
-        "synthesis": status_container.empty(),
-    }
     
-    placeholders["fetch_data"].markdown("⏳ **Downloading Financial Data...**")
+    # --- MODE SELECTION LOGIC ---
+    if workflow_mode == "Risk Analysis Only":
+        target_graph = risk_only_graph
+        placeholders = {
+            "screener_for_risk": status_container.empty(),
+            "isolated_risk": status_container.empty(),
+        }
+        placeholders["screener_for_risk"].markdown("⏳ **Checking Credit Ratings...**")
+    
+    else: # Default: Full Workflow
+        target_graph = app_graph
+        placeholders = {
+            "fetch_data": status_container.empty(),
+            "quant": status_container.empty(),
+            "strategy": status_container.empty(),
+            "risk": status_container.empty(),
+            "qual": status_container.empty(),
+            "valuation": status_container.empty(),
+            "synthesis": status_container.empty(),
+        }
+        placeholders["fetch_data"].markdown("⏳ **Downloading Financial Data...**")
 
-    # Pass the inputs to the graph
-    for event in app_graph.stream(inputs):
+    # --- EXECUTION ---
+    for event in target_graph.stream(inputs):
         for node_name, node_output in event.items():
             if node_output:
                 final_state_result.update(node_output)
             
-            # Update Status Indicators
-            if node_name == "fetch_data":
-                c_name = node_output.get("company_name", ticker_symbol)
-                progress_text_container.write(f"Analyzing {ticker_symbol} ({c_name})...")
-                placeholders["fetch_data"].markdown("✅ **Data Downloaded**")
-                placeholders["quant"].markdown("⏳ **Running Quantitative Analysis...**")
-            elif node_name == "quantitative_analysis":
-                placeholders["quant"].markdown("✅ **Quantitative Analysis Complete**")
-                placeholders["strategy"].markdown("⏳ **Analyzing Strategy...**")
-            elif node_name == "strategy_analysis":
-                placeholders["strategy"].markdown("✅ **Strategy Analysis Complete**")
-                placeholders["risk"].markdown("⏳ **Analyzing Risk...**")
-            elif node_name == "risk_analysis":
-                placeholders["risk"].markdown("✅ **Risk Analysis Complete**")
-                placeholders["qual"].markdown("⏳ **Running Qualitative Analysis...**")
-            elif node_name == "qualitative_analysis":
-                placeholders["qual"].markdown("✅ **Qualitative Analysis Complete**")
-                placeholders["valuation"].markdown("⏳ **Running Valuation...**")
-            elif node_name == "valuation_analysis":
-                 placeholders["valuation"].markdown("✅ **Valuation Complete**")
-                 placeholders["synthesis"].markdown("⏳ **Generating Final Summary...**")
-            elif node_name == "synthesis":
-                 placeholders["synthesis"].markdown("✅ **Summary Generated**")
+            # Update Status Indicators based on Mode
+            if workflow_mode == "Risk Analysis Only":
+                if node_name == "screener_for_risk":
+                    c_name = node_output.get("company_name", ticker_symbol)
+                    progress_text_container.write(f"Analyzing Risk for {ticker_symbol} ({c_name})...")
+                    placeholders["screener_for_risk"].markdown("✅ **Credit Data Fetched**")
+                    placeholders["isolated_risk"].markdown("⏳ **Generating Risk Profile...**")
+                elif node_name == "isolated_risk":
+                    placeholders["isolated_risk"].markdown("✅ **Risk Analysis Complete**")
+            
+            else: # Full Workflow Updates
+                if node_name == "fetch_data":
+                    c_name = node_output.get("company_name", ticker_symbol)
+                    progress_text_container.write(f"Analyzing {ticker_symbol} ({c_name})...")
+                    placeholders["fetch_data"].markdown("✅ **Data Downloaded**")
+                    placeholders["quant"].markdown("⏳ **Running Quantitative Analysis...**")
+                elif node_name == "quantitative_analysis":
+                    placeholders["quant"].markdown("✅ **Quantitative Analysis Complete**")
+                    placeholders["strategy"].markdown("⏳ **Analyzing Strategy...**")
+                elif node_name == "strategy_analysis":
+                    placeholders["strategy"].markdown("✅ **Strategy Analysis Complete**")
+                    placeholders["risk"].markdown("⏳ **Analyzing Risk...**")
+                elif node_name == "risk_analysis":
+                    placeholders["risk"].markdown("✅ **Risk Analysis Complete**")
+                    placeholders["qual"].markdown("⏳ **Running Qualitative Analysis...**")
+                elif node_name == "qualitative_analysis":
+                    placeholders["qual"].markdown("✅ **Qualitative Analysis Complete**")
+                    placeholders["valuation"].markdown("⏳ **Running Valuation...**")
+                elif node_name == "valuation_analysis":
+                     placeholders["valuation"].markdown("✅ **Valuation Complete**")
+                     placeholders["synthesis"].markdown("⏳ **Generating Final Summary...**")
+                elif node_name == "synthesis":
+                     placeholders["synthesis"].markdown("✅ **Summary Generated**")
 
     final_state_result['ticker'] = ticker_symbol
+    final_state_result['workflow_mode'] = workflow_mode
     return final_state_result
 
 # --- Streamlit UI ---
@@ -417,7 +519,16 @@ if 'analysis_results' not in st.session_state:
 
 st.sidebar.header("Controls")
 
-# Mode Selection
+# --- PHASE 0.5: MODE SELECTOR ---
+workflow_mode = st.sidebar.selectbox(
+    "Select Workflow",
+    [
+        "Full Workflow (PDF Report)",
+        "Risk Analysis Only"
+    ]
+)
+# --------------------------------
+
 analysis_mode = st.sidebar.radio("Analysis Mode", ["Single Ticker", "Batch Analysis"])
 
 tickers_to_process = []
@@ -464,8 +575,8 @@ if st.sidebar.button("🚀 Run Analysis", type="primary"):
                 with st.status(f"Processing {ticker} ({i+1}/{total_tickers})...", expanded=True) as status:
                     progress_text = st.empty()
                     
-                    # Run logic
-                    result_state = run_analysis_for_ticker(ticker, is_consolidated, status, progress_text)
+                    # Pass workflow_mode to runner
+                    result_state = run_analysis_for_ticker(ticker, is_consolidated, status, progress_text, workflow_mode)
                     
                     # 3. INCREMENTAL COMMIT (Save immediately)
                     st.session_state.analysis_results[ticker] = result_state
@@ -498,12 +609,12 @@ if st.session_state.analysis_results:
                     filename = f"Report_{ticker}_{timestamp}.pdf"
                     zf.writestr(filename, state['pdf_report_bytes'])
 
+        # Only show ZIP download if there are PDF bytes to download (Full Mode)
+        # In Risk-only mode, we won't have PDFs, so this button logically hides itself or we can check the mode.
         if has_pdfs:
-            # zip_buffer.seek(0)  <-- No longer strictly needed if using getvalue(), but good practice
-            
             st.download_button(
                 label="📦 **Download All Reports (ZIP)**",
-                data=zip_buffer.getvalue(),  # <--- CRITICAL FIX: Add .getvalue()
+                data=zip_buffer.getvalue(),
                 file_name=f"Batch_Reports_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.zip",
                 mime="application/zip",
                 use_container_width=True,
@@ -518,54 +629,72 @@ if st.session_state.analysis_results:
         selected_ticker = st.selectbox("Select Report to View:", available_tickers, index=len(available_tickers)-1)
 
     final_state = st.session_state.analysis_results[selected_ticker]
+    run_mode = final_state.get('workflow_mode', "Full Workflow (PDF Report)")
     company_display_name = final_state.get('company_name') or final_state.get('ticker')
 
     with col_info:
-        st.subheader(f"Results for: {company_display_name}")
+        st.subheader(f"Results for: {company_display_name} ({run_mode})")
 
-    if final_state.get('final_report'):
-        st.markdown("### 📈📝 Investment Thesis")
-        thesis = extract_investment_thesis(final_state['final_report'])
-        st.markdown(thesis, unsafe_allow_html=True)
-
-    st.markdown("---")
-
-    if final_state.get('pdf_report_bytes'):
-        col1, col2, col3 = st.columns([2, 3, 2])
-        with col2:
-            st.download_button(
-                label=f"**Download PDF for {selected_ticker}**",
-                data=final_state['pdf_report_bytes'],
-                file_name=f"Report_{selected_ticker}.pdf",
-                mime="application/pdf",
-                use_container_width=True
-            )
-
-    with st.expander(f"📂 Deep-Dive Data: {selected_ticker}", expanded=False):
-        tab_strat, tab_risk, tab_val, tab_qual, tab_quant, tab_log = st.tabs([
-            "Strategy", "Risk", "Valuation", "Qualitative", "Quantitative", "Execution Logs"
-        ])
+    # --- DISPLAY LOGIC BY MODE ---
+    
+    if run_mode == "Risk Analysis Only":
+        # Simplified View for Risk Mode
+        st.info("Risk Analysis Mode: Only Credit/Risk data was analyzed.")
         
-        with tab_strat:
-            if final_state.get('strategy_results'): st.markdown(final_state['strategy_results'])
-            else: st.warning("Not available.")
-        with tab_risk:
-            if final_state.get('risk_results'): st.markdown(final_state['risk_results'])
-            else: st.warning("Not available.")
-        with tab_val:
-            if final_state.get('valuation_results'): 
-                val_data = final_state['valuation_results']
-                st.markdown(val_data.get('content', val_data) if isinstance(val_data, dict) else val_data)
-            else: st.warning("Not available.")
-        with tab_qual:
-            if final_state.get('qualitative_results'):
-                for k, v in final_state['qualitative_results'].items():
-                    st.markdown(f"**{k.replace('_', ' ').title()}:** {v}")
-            else: st.warning("Not available.")
-        with tab_quant:
-            if final_state.get('quant_text_for_synthesis'): st.markdown(final_state['quant_text_for_synthesis'])
-        with tab_log:
-            if final_state.get('log_file_content'): st.code(final_state['log_file_content'], language='markdown')
+        st.markdown("### 🛡️ Credit Risk Profile")
+        if final_state.get('risk_results'):
+             st.markdown(final_state['risk_results'])
+        else:
+             st.warning("No risk results found.")
+             
+        with st.expander("View Execution Logs"):
+             if final_state.get('log_file_content'): st.code(final_state['log_file_content'], language='markdown')
+    
+    else:
+        # Full Workflow View
+        if final_state.get('final_report'):
+            st.markdown("### 📈📝 Investment Thesis")
+            thesis = extract_investment_thesis(final_state['final_report'])
+            st.markdown(thesis, unsafe_allow_html=True)
+
+        st.markdown("---")
+
+        if final_state.get('pdf_report_bytes'):
+            col1, col2, col3 = st.columns([2, 3, 2])
+            with col2:
+                st.download_button(
+                    label=f"**Download PDF for {selected_ticker}**",
+                    data=final_state['pdf_report_bytes'],
+                    file_name=f"Report_{selected_ticker}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+
+        with st.expander(f"📂 Deep-Dive Data: {selected_ticker}", expanded=False):
+            tab_strat, tab_risk, tab_val, tab_qual, tab_quant, tab_log = st.tabs([
+                "Strategy", "Risk", "Valuation", "Qualitative", "Quantitative", "Execution Logs"
+            ])
+            
+            with tab_strat:
+                if final_state.get('strategy_results'): st.markdown(final_state['strategy_results'])
+                else: st.warning("Not available.")
+            with tab_risk:
+                if final_state.get('risk_results'): st.markdown(final_state['risk_results'])
+                else: st.warning("Not available.")
+            with tab_val:
+                if final_state.get('valuation_results'): 
+                    val_data = final_state['valuation_results']
+                    st.markdown(val_data.get('content', val_data) if isinstance(val_data, dict) else val_data)
+                else: st.warning("Not available.")
+            with tab_qual:
+                if final_state.get('qualitative_results'):
+                    for k, v in final_state['qualitative_results'].items():
+                        st.markdown(f"**{k.replace('_', ' ').title()}:** {v}")
+                else: st.warning("Not available.")
+            with tab_quant:
+                if final_state.get('quant_text_for_synthesis'): st.markdown(final_state['quant_text_for_synthesis'])
+            with tab_log:
+                if final_state.get('log_file_content'): st.code(final_state['log_file_content'], language='markdown')
 
 elif not st.session_state.analysis_results:
     st.info("No reports generated yet.")
