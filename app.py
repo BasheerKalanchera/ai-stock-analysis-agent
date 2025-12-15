@@ -15,12 +15,13 @@ from langgraph.graph import StateGraph, END
 
 # --- Import Agent Functions ---
 from Screener_Download import download_financial_data
-# Updated imports to include the new standalone comparison function
+# Updated imports to include the new standalone comparison function and Scuttlebutt
 from qualitative_analysis_agent import (
     run_qualitative_analysis, 
     run_isolated_sebi_check, 
     run_earnings_analysis_standalone,
-    run_comparison_standalone
+    run_comparison_standalone,
+    run_scuttlebutt_standalone
 )
 from quantitative_agent import analyze_financials
 from valuation_agent import run_valuation_analysis
@@ -474,6 +475,32 @@ def compare_quarters_node(state: StockAnalysisState):
     
     return {"qualitative_results": qual_res, "log_file_content": log_content_accumulator}
 
+# ==============================================================================
+# 4c. SCUTTLEBUTT RESEARCH NODE (NEW)
+# ==============================================================================
+def scuttlebutt_analysis_node(state: StockAnalysisState):
+    company_name = state.get('company_name') or state['ticker']
+    config = state['agent_config']
+    log_content_accumulator = state['log_file_content']
+    
+    # Extract Strategy and Risk results from state to use as inputs
+    strat_res = state.get('strategy_results')
+    risk_res = state.get('risk_results')
+
+    result_text = execute_with_fallback(
+        run_scuttlebutt_standalone, log_content_accumulator, "Scuttlebutt",
+        company_name, config,
+        strat=strat_res, # Passing previous agent outputs as kwargs
+        risk=risk_res
+    )
+
+    log_entry = f"## SCUTTLEBUTT RESEARCH\n\n{result_text}\n\n---\n"
+    log_content_accumulator += log_entry
+
+    current_qual = state.get('qualitative_results') or {}
+    current_qual['scuttlebutt'] = result_text
+
+    return {"qualitative_results": current_qual, "log_file_content": log_content_accumulator}
 
 # ==============================================================================
 # 5. BUILD GRAPHS
@@ -543,6 +570,22 @@ strategy_shift_workflow_def.add_edge("compare_quarters", END)
 
 strategy_shift_graph = strategy_shift_workflow_def.compile()
 
+# --- F. SCUTTLEBUTT GRAPH (NEW) ---
+# Includes Strategy and Risk nodes as prerequisites for inputs
+scuttlebutt_workflow_def = StateGraph(StockAnalysisState)
+scuttlebutt_workflow_def.add_node("fetch_data", fetch_data_node) # Needs full data for Strategy/Risk
+scuttlebutt_workflow_def.add_node("strategy_analysis", strategy_analysis_node)
+scuttlebutt_workflow_def.add_node("risk_analysis", risk_analysis_node)
+scuttlebutt_workflow_def.add_node("scuttlebutt_analysis", scuttlebutt_analysis_node)
+
+scuttlebutt_workflow_def.set_entry_point("fetch_data")
+scuttlebutt_workflow_def.add_edge("fetch_data", "strategy_analysis")
+scuttlebutt_workflow_def.add_edge("strategy_analysis", "risk_analysis")
+scuttlebutt_workflow_def.add_edge("risk_analysis", "scuttlebutt_analysis")
+scuttlebutt_workflow_def.add_edge("scuttlebutt_analysis", END)
+
+scuttlebutt_graph = scuttlebutt_workflow_def.compile()
+
 
 # --- Helper Function for UI ---
 def extract_investment_thesis(full_report: str) -> str:
@@ -604,6 +647,16 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
         }
         placeholders["fetch_both"].markdown("⏳ **Fetching History...**")
 
+    elif workflow_mode == "Scuttlebutt Research":
+        target_graph = scuttlebutt_graph
+        placeholders = {
+            "fetch_data": status_container.empty(),
+            "strategy_analysis": status_container.empty(),
+            "risk_analysis": status_container.empty(),
+            "scuttlebutt_analysis": status_container.empty()
+        }
+        placeholders["fetch_data"].markdown("⏳ **Downloading Financial Data...**")
+
     else: # Default: Full Workflow
         target_graph = app_graph
         placeholders = {
@@ -663,6 +716,21 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                 elif node_name == "compare_quarters":
                     placeholders["compare_quarters"].markdown("✅ **Comparison Complete**")
             
+            elif workflow_mode == "Scuttlebutt Research":
+                if node_name == "fetch_data":
+                    c_name = node_output.get("company_name", ticker_symbol)
+                    progress_text_container.write(f"Researching {ticker_symbol} ({c_name})...")
+                    placeholders["fetch_data"].markdown("✅ **Financials Downloaded**")
+                    placeholders["strategy_analysis"].markdown("⏳ **Analyzing Strategy...**")
+                elif node_name == "strategy_analysis":
+                    placeholders["strategy_analysis"].markdown("✅ **Strategy Analysis Done**")
+                    placeholders["risk_analysis"].markdown("⏳ **Analyzing Risk...**")
+                elif node_name == "risk_analysis":
+                    placeholders["risk_analysis"].markdown("✅ **Risk Analysis Done**")
+                    placeholders["scuttlebutt_analysis"].markdown("⏳ **Gathering Intel (News/Forums)...**")
+                elif node_name == "scuttlebutt_analysis":
+                    placeholders["scuttlebutt_analysis"].markdown("✅ **Research Complete**")
+
             else: # Full Workflow Updates
                 if node_name == "fetch_data":
                     c_name = node_output.get("company_name", ticker_symbol)
@@ -708,7 +776,8 @@ workflow_mode = st.sidebar.selectbox(
         "Risk Analysis Only",
         "SEBI Violations Check (MVP)",
         "Latest Earnings Decoder",
-        "Strategic Shift Analyzer (QoQ)" # <--- NEW OPTION
+        "Strategic Shift Analyzer (QoQ)",
+        "Scuttlebutt Research" # <--- NEW OPTION
     ]
 )
 # ------------------------------------
@@ -899,6 +968,21 @@ if st.session_state.analysis_results:
             tab_l, tab_p = st.tabs(["Latest Quarter Raw", "Previous Quarter Raw"])
             with tab_l: st.markdown(qual_res.get('latest_analysis', 'N/A'))
             with tab_p: st.markdown(qual_res.get('previous_analysis', 'N/A'))
+
+        with st.expander("View Execution Logs"):
+             if final_state.get('log_file_content'): st.code(final_state['log_file_content'], language='markdown')
+
+    elif run_mode == "Scuttlebutt Research":
+        st.info("Scuttlebutt Mode: 360-degree qualitative research using news, employee reviews, and industry forums.")
+        
+        qual_res = final_state.get('qualitative_results', {})
+        scuttle_text = qual_res.get('scuttlebutt')
+        
+        if scuttle_text:
+            st.markdown("### 🕵️ Scuttlebutt Investigation Report")
+            st.markdown(scuttle_text)
+        else:
+            st.warning("Scuttlebutt analysis could not be generated.")
 
         with st.expander("View Execution Logs"):
              if final_state.get('log_file_content'): st.code(final_state['log_file_content'], language='markdown')

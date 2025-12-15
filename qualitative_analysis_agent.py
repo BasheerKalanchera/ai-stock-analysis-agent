@@ -9,9 +9,10 @@ import time
 import re       
 import random   
 import json
+from urllib.parse import urlparse  # <--- NEW: For better source citation
 from google.api_core import exceptions as google_exceptions
 import nest_asyncio
-nest_asyncio.apply() # <--- CRITICAL FIX: Allows nested event loops
+nest_asyncio.apply()
 
 # --- TOOL IMPORTS ---
 try:
@@ -65,7 +66,6 @@ def _search_tool(query: str, api_key: str = None, required_keywords: List[str] =
         try:
             logger.info(f"🔎 Executing TAVILY Search: {query}")
             client = TavilyClient(api_key=api_key)
-            # Fetch MORE results (10) because the filter will delete some
             response = client.search(query, search_depth="advanced", max_results=20)
             raw_results = response.get("results", [])
             source_name = "Tavily"
@@ -76,7 +76,6 @@ def _search_tool(query: str, api_key: str = None, required_keywords: List[str] =
         try:
             logger.info(f"🔎 Executing DDG Fallback Search: {query}")
             with DDGS() as ddgs:
-                # Fetch MORE results (15) for filtering buffer
                 raw_results = list(ddgs.text(query, region='in-en', safesearch='off', max_results=15))
             source_name = "DuckDuckGo"
         except Exception as e:
@@ -91,15 +90,10 @@ def _search_tool(query: str, api_key: str = None, required_keywords: List[str] =
     if required_keywords:
         logger.info(f"   🛡️ Applying Keyword Firewall: {required_keywords}")
         for r in raw_results:
-            # Combine all text fields
-            # Tavily uses 'content', DDG uses 'body'
             text_blob = (r.get('title', '') + " " + r.get('content', '') + " " + r.get('body', '') + " " + r.get('snippet', '')).lower()
-            
-            # CHECK: Does the text contain at least one of the required keywords?
             if any(k.lower() in text_blob for k in required_keywords):
                 filtered_results.append(r)
             else:
-                # Irrelevant result dropped here
                 pass
     else:
         filtered_results = raw_results
@@ -109,13 +103,70 @@ def _search_tool(query: str, api_key: str = None, required_keywords: List[str] =
         return f"No results found regarding {required_keywords} specifically."
 
     output = f"Search Results (Source: {source_name}, Filtered for {required_keywords}):\n"
-    # Limit to top 7 AFTER filtering to keep context size manageable
     for i, r in enumerate(filtered_results[:7], 1):
         url = r.get('url') or r.get('href', 'N/A')
         content = r.get('content') or r.get('body') or r.get('snippet', 'N/A')
-        output += f"{i}. Title: {r.get('title')}\n   URL: {url}\n   Content: {content}\n\n"
+        
+        # CLEAN SOURCE DISPLAY
+        try:
+            domain = urlparse(url).netloc.replace("www.", "")
+        except:
+            domain = "web"
+        
+        output += f"{i}. Source: {r.get('title')} ({domain})\n   URL: {url}\n   Content: {content}\n\n"
     
     return output
+
+def _perform_scuttlebutt_search(company_name: str, api_key: str) -> str:
+    """
+    Helper to perform DEEP DIVE targeted searches.
+    NOW: 
+    1. Extracts domain names to fix "[PDF]" issue.
+    2. Uses more specific "Investigative" queries.
+    3. Fetches more results (max_results=5).
+    """
+    if not api_key:
+        return "Warning: TAVILY_API_KEY not found. Search skipped."
+
+    try:
+        tavily = TavilyClient(api_key=api_key)
+        
+        # UPGRADED: More specific, investigative queries
+        queries = [
+            f"{company_name} management interview transcripts outlook 2025 key takeaways",
+            f"{company_name} channel checks dealers distributors complaints margins vs competitors",
+            f"{company_name} forensic accounting red flags short seller report fraud allegations",
+            f"{company_name} employee culture toxicity attrition Glassdoor reviews 2024 2025",
+            f"{company_name} market share loss vs competitors India industry report"
+        ]
+        
+        aggregated_context = "### EXTERNAL LIVE SEARCH RESULTS (GROUNDING DATA):\n"
+        
+        for q in queries:
+            logger.info(f"🔎 Deep-Dive Query: {q}")
+            # UPGRADED: Increased max_results to 5 for depth
+            response = tavily.search(query=q, search_depth="advanced", max_results=5)
+            results = response.get('results', [])
+            
+            for res in results:
+                # UPGRADED: Domain Extraction Logic
+                try:
+                    domain = urlparse(res['url']).netloc.replace("www.", "")
+                    # If title is generic "PDF", assume it's a doc from that domain
+                    if res['title'].strip().lower() in ["pdf", "document", "untitled"]:
+                        clean_title = f"Document/Filing from {domain}"
+                    else:
+                        clean_title = f"{res['title']} ({domain})"
+                except:
+                    clean_title = res['title']
+
+                aggregated_context += f"- Source: {clean_title}\n  URL: {res['url']}\n  Content: {res['content']}\n\n"
+        
+        return aggregated_context
+
+    except Exception as e:
+        logger.error(f"Scuttlebutt Search Failed: {e}")
+        return f"Search failed due to error: {str(e)}"
 
 # --- CORE FUNCTIONS ---
 
@@ -215,9 +266,7 @@ def _manual_react_loop(prompt: str, analysis_type: str, model_name: str, tavily_
                 except: pass
             
             logger.info(f"   [ReAct Turn {i+1}] Model provided final answer.")
-            # FIX: Escape dollar signs to prevent Streamlit/Markdown from treating them as LaTeX
             safe_response_text = response_text.replace("$", "\\$")
-
             return safe_response_text            
         except Exception as e: return f"Analysis failed: {str(e)}"
             
@@ -233,7 +282,6 @@ def _analyze_with_tools(prompt: str, analysis_type: str, model_name: str, agent_
     if is_gemma:
         return _manual_react_loop(prompt, analysis_type, model_name, tavily_key=tavily_key, filter_keywords=filter_keywords)
     else:
-        # Native tool wrapper with filtering
         def search_tool_wrapper(query: str): 
             return _search_tool(query, api_key=tavily_key, required_keywords=filter_keywords)
             
@@ -335,26 +383,46 @@ def _analyze_positives_and_concerns(transcript_text: str, agent_config: dict) ->
 
 def _scuttlebutt_sync(company_name: str, context_text: str, agent_config: dict) -> str:
     logger.info("Starting scuttlebutt analysis...")
-    context_instruction = ""
-    if context_text and len(context_text) > 10:
-        context_instruction = f"**COMPANY BACKGROUND & CONTEXT:**\nUse the following summary to GROUND your research.\n{context_text}"
+    
+    # 1. GROUNDING: Fetch real data first using Tavily
+    tavily_key = agent_config.get("TAVILY_API_KEY")
+    search_context = ""
+    if tavily_key:
+        logger.info(f"Fetching live scuttlebutt data for {company_name}...")
+        search_context = _perform_scuttlebutt_search(company_name, tavily_key)
+    else:
+        logger.warning("No TAVILY_API_KEY. Scuttlebutt will run without live data.")
+        search_context = "No live search results available. Rely on internal knowledge (Risk: high hallucination)."
+
+    # 2. CONTEXT PREP: Combine internal notes with search data
+    combined_context = f"{search_context}\n\n### INTERNAL NOTES:\n{context_text}"
+    
     prompt = f"""
-    As a world-class financial analyst following Philip Fisher's "Scuttlebutt" method, conduct a deep investigation into the company: **{company_name}**.
-    {context_instruction}
-    Your goal is to gather qualitative insights that are not typically found in financial statements. Search for and synthesize the most up-to-date information available as of **September 2025** from a wide range of sources including:
-    - Recent news articles, focusing on the period from **late 2024 to the present day**
-    - The latest industry reports and forum discussions
-    - Employee reviews (e.g., Glassdoor) posted within the last year
-    - Recent customer feedback and reviews
-    - Management interviews or public statements from **2025**
-    - Any recent supply chain or partner commentary
-    **Synthesize your findings into a concise report covering these key areas:**
-    1.  **Competitive Landscape:** How is the company positioned against its main competitors? What are its key competitive advantages (moat)?
-    2.  **Management Quality & Culture:** What is the reputation of the CEO and the senior management team? What is the overall employee morale and company culture like?
-    3.  **Customer & Product Perception:** How do customers perceive the company's products or services? Are they seen as innovative, reliable, or a leader in their category?
-    4.  **Industry Trends & Headwinds:** What are the major tailwinds (positive trends) and headwinds (challenges) facing the industry and the company?
-    5.  **Red Flags:** Are there any potential issues, controversies, or risks that an investor should be aware of?
-    Provide a final summary of your overall impression. Use Markdown for formatting.
+    You are a forensic financial investigator executing Philip Fisher's "Scuttlebutt" methodology for: **{company_name}**.
+
+    ### INPUT CONTEXT (GROUND TRUTH)
+    The following are **real-time search results** and analysis notes. 
+    **CRITICAL INSTRUCTION:** You must answer the questions using **ONLY** this information. 
+    Do NOT invent names, dates, or figures.
+    If the search results say the CEO is "X", do not say it is "Y".
+    If a source is labeled "PDF" or "Document", use the domain name provided in the source description for clarity (e.g., "BSE Filing", "Broker Report").
+
+    {combined_context}
+
+    ### ANALYSIS GOALS (DEEP DIVE)
+    Synthesize the findings into a **Detailed Investigative Report**. Avoid generic statements; look for specific anecdotes, numbers, and dates.
+    
+    1.  **Channel Checks & Competitive Position:** * Do not just say "competitive market". Identifying specific complaints from dealers or distributors? 
+        * Are margins being squeezed? Who is taking market share?
+    2.  **Management Integrity & Governance:** * Look for details on recent tax raids, SEBI orders, or whistle-blower complaints. 
+        * Verify the names of Key Managerial Personnel against the search text.
+    3.  **Real-World Brand Perception:** * Go beyond "good brand". What are the specific recurring complaints on Glassdoor or Consumer Forums?
+    4.  **Strategic Shift & Outlook:** * What did management specifically promise in the latest interview vs what are they delivering?
+    5.  **Red Flags:** * Highlight any forensic risks, frequent auditor resignations, or related party transactions found in the text.
+
+    ### FORMAT
+    Return the response in Markdown. 
+    **CITATION RULE:** Cite the specific source (e.g., [Mint Article], [BSE Filing]) for every major claim. Do not just use [PDF].
     """
     return _analyze_with_gemini(prompt, "Scuttlebutt Analysis", agent_config.get("HEAVY_MODEL_NAME", "gemini-1.5-pro"), agent_config.get("GOOGLE_API_KEY"))
 
@@ -552,3 +620,31 @@ def run_comparison_standalone(latest_analysis_text: str, previous_analysis_text:
     except Exception as e:
         logger.error(f"❌ QUAL (Standalone) - Comparison Failed: {e}")
         return f"Comparison analysis failed: {str(e)}"
+    
+def run_scuttlebutt_standalone(company_name: str, config: dict, strat: str = "", risk: str = "") -> str:
+    """
+    Standalone runner for the 'Scuttlebutt Research' app.
+    Now uses live Tavily search to prevent hallucinations.
+    Strategy and Risk are accepted as optional context but are secondary to live search data.
+    """
+    try:
+        if not company_name:
+            return "Company name is required for Scuttlebutt analysis."
+
+        logger.info(f"🟡 QUAL (Standalone) - Starting Scuttlebutt analysis for {company_name}...")
+        
+        # Combine strategy and risk inputs into a single internal note
+        context_parts = []
+        if strat: context_parts.append(f"STRATEGY NOTES:\n{strat}")
+        if risk: context_parts.append(f"RISK NOTES:\n{risk}")
+        internal_context = "\n\n".join(context_parts)
+
+        # Pass context to internal helper which will NOW PERFORM SEARCH FIRST
+        result = _scuttlebutt_sync(company_name, internal_context, config)
+        
+        logger.info("🟡 QUAL (Standalone) - Scuttlebutt analysis complete.")
+        return result
+
+    except Exception as e:
+        logger.error(f"❌ QUAL (Standalone) - Scuttlebutt Failed: {e}")
+        return f"Scuttlebutt analysis failed: {str(e)}"
