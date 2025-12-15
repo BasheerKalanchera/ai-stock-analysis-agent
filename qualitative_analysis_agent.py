@@ -503,3 +503,30 @@ def run_qualitative_analysis(company_name, latest, previous, config, strat="", r
 
 def run_isolated_sebi_check(company_name, agent_config):
     return _sebi_sync(company_name, agent_config)
+
+def run_earnings_analysis_standalone(company_name, transcript_buffer, config):
+    """
+    Standalone runner for the 'Latest Earnings Decoder' app.
+    Synchronous execution for a single PDF.
+    """
+    try:
+        if not transcript_buffer:
+            return "No transcript file provided."
+
+        logger.info(f"🟡 QUAL (Standalone) - Starting analysis for {company_name}...")
+        
+        # 1. Extract Text (Reusing existing helper)
+        text = _extract_text_from_pdf_buffer(transcript_buffer)
+        if not text:
+            return "Failed to extract text from PDF."
+
+        # 2. Run Analysis (Reusing existing helper)
+        # Note: _analyze_positives_and_concerns handles the chunking/map-reduce logic internally
+        result = _analyze_positives_and_concerns(text, config)
+        
+        logger.info(f"🟡 QUAL (Standalone) - Analysis complete for {company_name}.")
+        return result
+
+    except Exception as e:
+        logger.error(f"❌ QUAL (Standalone) - Failed: {e}")
+        return f"Analysis failed: {str(e)}"

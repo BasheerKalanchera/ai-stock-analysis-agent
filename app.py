@@ -14,8 +14,12 @@ from langgraph.graph import StateGraph, END
 
 # --- Import Agent Functions ---
 from Screener_Download import download_financial_data
-# Note: Added run_isolated_sebi_check to imports
-from qualitative_analysis_agent import run_qualitative_analysis, run_isolated_sebi_check
+# Note: Added run_earnings_analysis_standalone to imports
+from qualitative_analysis_agent import (
+    run_qualitative_analysis, 
+    run_isolated_sebi_check, 
+    run_earnings_analysis_standalone
+)
 from quantitative_agent import analyze_financials
 from valuation_agent import run_valuation_analysis
 from synthesis_agent import generate_investment_summary
@@ -30,8 +34,7 @@ from risk_agent import risk_analyst_agent
 st.set_page_config(page_title="AI Stock Analysis Crew", page_icon="🤖", layout="wide")
 load_dotenv()
 
-# ... (Configuration, Secret Handling, and Resilience Logic - execute_with_fallback - remain exactly as provided) ...
-
+# --- Configuration & Secret Handling ---
 def get_secret(key, default=None):
     try:
         return st.secrets.get(key, os.getenv(key, default))
@@ -49,14 +52,15 @@ agent_configs = {
     "SCREENER_EMAIL": get_secret("SCREENER_EMAIL"),
     "SCREENER_PASSWORD": get_secret("SCREENER_PASSWORD"),
     "GOOGLE_API_KEY": get_secret("GOOGLE_API_KEY"),
-    "LITE_MODEL_NAME": get_secret("LITE_MODEL_NAME", "gemini-2.5-flash-lite"),
-    "HEAVY_MODEL_NAME": get_secret("HEAVY_MODEL_NAME", "gemini-2.5-flash"),
-    "FALLBACK_REQUEST_MODEL": "gemini-2.5-flash-lite", 
+    "LITE_MODEL_NAME": get_secret("LITE_MODEL_NAME", "gemini-2.0-flash-lite"),
+    "HEAVY_MODEL_NAME": get_secret("HEAVY_MODEL_NAME", "gemini-2.0-flash"),
+    "FALLBACK_REQUEST_MODEL": "gemini-2.0-flash-lite", 
     "FALLBACK_TOKEN_MODEL": "gemini-2.0-flash",
     "TAVILY_API_KEY": get_secret("TAVILY_API_KEY"),
     "IS_CLOUD_ENV": is_cloud_env
 }
 
+# --- Resilience Logic ---
 def execute_with_fallback(func, log_accumulator, agent_name, *args, **kwargs):
     config = kwargs.get('config')
     if not config and len(args) > 0 and isinstance(args[-1], dict):
@@ -110,9 +114,10 @@ class StockAnalysisState(TypedDict):
     pdf_report_bytes: bytes | None
     is_consolidated: bool | None
     agent_config: Dict[str, Any]
+    workflow_mode: str | None # Track which mode was run
 
 # ==============================================================================
-# 1. FULL WORKFLOW NODES (Original)
+# 1. FULL WORKFLOW NODES
 # ==============================================================================
 
 def fetch_data_node(state: StockAnalysisState):
@@ -139,7 +144,6 @@ def fetch_data_node(state: StockAnalysisState):
     return {"company_name": company_name, "file_data": file_data, "peer_data": peer_data, "log_file_content": log_content_accumulator}
 
 def quantitative_analysis_node(state: StockAnalysisState):
-    # ... (Same as provided) ...
     excel_data = state['file_data'].get('excel')
     log_content_accumulator = state['log_file_content']
     config = state['agent_config']
@@ -162,7 +166,6 @@ def quantitative_analysis_node(state: StockAnalysisState):
     return {"quant_results_structured": structured_results, "quant_text_for_synthesis": text_results, "log_file_content": log_content_accumulator}
 
 def strategy_analysis_node(state: StockAnalysisState):
-    # ... (Same as provided) ...
     log_content_accumulator = state['log_file_content']
     config = state['agent_config']
     
@@ -179,7 +182,6 @@ def strategy_analysis_node(state: StockAnalysisState):
     return {"strategy_results": result_text, "log_file_content": log_content_accumulator}
 
 def risk_analysis_node(state: StockAnalysisState):
-    # ... (Same as provided) ...
     log_content_accumulator = state['log_file_content']
     config = state['agent_config']
     
@@ -196,7 +198,6 @@ def risk_analysis_node(state: StockAnalysisState):
     return {"risk_results": result_text, "log_file_content": log_content_accumulator}
 
 def qualitative_analysis_node(state: StockAnalysisState):
-    # ... (Same as provided) ...
     company = state['company_name'] or state['ticker']
     log_content_accumulator = state['log_file_content']
     config = state['agent_config']
@@ -209,8 +210,8 @@ def qualitative_analysis_node(state: StockAnalysisState):
         state['file_data'].get("latest_transcript"),
         state['file_data'].get("previous_transcript"),
         config,
-        strat=strategy_ctx,   # <--- CHANGED from strategy_context
-        risk=risk_ctx         # <--- CHANGED from risk_context
+        strat=strategy_ctx,
+        risk=risk_ctx
     )
     
     log_entry = "## AGENT 5: QUALITATIVE ANALYSIS\n\n"
@@ -225,7 +226,6 @@ def qualitative_analysis_node(state: StockAnalysisState):
     return {"qualitative_results": results if isinstance(results, dict) else {}, "log_file_content": log_content_accumulator}
 
 def valuation_analysis_node(state: StockAnalysisState):
-    # ... (Same as provided) ...
     ticker = state['ticker']
     company_name = state.get('company_name') 
     peer_data = state.get('peer_data')
@@ -243,7 +243,6 @@ def valuation_analysis_node(state: StockAnalysisState):
     return {"valuation_results": results if isinstance(results, dict) else {}, "log_file_content": log_content_accumulator}
 
 def synthesis_node(state: StockAnalysisState):
-    # ... (Same as provided) ...
     log_content_accumulator = state['log_file_content']
     config = state['agent_config']
     quant_text = state.get('quant_text_for_synthesis', "Quantitative analysis was not performed.")
@@ -263,7 +262,6 @@ def synthesis_node(state: StockAnalysisState):
     return {"final_report": report, "log_file_content": log_content_accumulator}
 
 def generate_report_node(state: StockAnalysisState):
-    # ... (Same as provided) ...
     pdf_buffer = io.BytesIO()
     create_pdf_report(
         ticker=state['ticker'],
@@ -287,7 +285,6 @@ def delay_node(state: StockAnalysisState):
 # 2. RISK NODES (Phase 0.5)
 # ==============================================================================
 def screener_for_risk_node(state: StockAnalysisState):
-    # ... (Same as provided) ...
     ticker = state['ticker']
     is_consolidated = state['is_consolidated']
     config = state['agent_config']
@@ -307,7 +304,6 @@ def screener_for_risk_node(state: StockAnalysisState):
     return {"company_name": company_name, "file_data": file_data, "log_file_content": log_content_accumulator}
 
 def isolated_risk_node(state: StockAnalysisState):
-    # ... (Same as provided) ...
     log_content_accumulator = state['log_file_content']
     config = state['agent_config']
     
@@ -324,13 +320,10 @@ def isolated_risk_node(state: StockAnalysisState):
     return {"risk_results": result_text, "log_file_content": log_content_accumulator}
 
 # ==============================================================================
-# 3. SEBI MVP NODES (NEW)
+# 3. SEBI MVP NODES
 # ==============================================================================
 
 def screener_metadata_node(state: StockAnalysisState):
-    """
-    Lightweight Node: Fetches ONLY the company name to ground the SEBI check.
-    """
     ticker = state['ticker']
     config = state['agent_config']
     log_content_accumulator = state.get('log_file_content', "")
@@ -346,9 +339,6 @@ def screener_metadata_node(state: StockAnalysisState):
     return {"company_name": company_name, "log_file_content": log_content_accumulator}
 
 def sebi_check_node(state: StockAnalysisState):
-    """
-    Runs the Live SEBI Violation Check.
-    """
     company_name = state.get('company_name') or state['ticker']
     config = state['agent_config']
     log_content_accumulator = state.get('log_file_content', "")
@@ -358,18 +348,61 @@ def sebi_check_node(state: StockAnalysisState):
     log_entry = f"## SEBI MVP: REGULATORY CHECK\n\n{result_text}\n\n---\n"
     log_content_accumulator += log_entry
 
-    # We store the result in qualitative_results for easy access in the UI
     current_qual = state.get('qualitative_results') or {}
     current_qual['sebi_check'] = result_text
 
     return {"qualitative_results": current_qual, "log_file_content": log_content_accumulator}
 
+# ==============================================================================
+# 4. EARNINGS DECODER NODES (NEW MVP)
+# ==============================================================================
+
+def screener_latest_transcript_node(state: StockAnalysisState):
+    """Downloads ONLY the latest transcript."""
+    ticker = state['ticker']
+    config = state['agent_config']
+    log_content_accumulator = state.get('log_file_content', "")
+
+    # For now, we reuse the standard downloader but ignore unnecessary files in logic
+    # Ideally, you would optimize download_financial_data to support 'latest_only=True'
+    company_name, file_data, _ = download_financial_data(
+        ticker, config, 
+        need_excel=False, 
+        need_ppt=False, 
+        need_peers=False, 
+        need_credit_report=False
+    )
+
+    status = "Downloaded" if file_data.get('latest_transcript') else "Not Found"
+    log_entry = f"## EARNINGS DECODER: DOWNLOAD\n\n**Latest Transcript**: {status}\n\n---\n"
+    log_content_accumulator += log_entry
+    
+    return {"company_name": company_name, "file_data": file_data, "log_file_content": log_content_accumulator}
+
+def analyze_latest_transcript_node(state: StockAnalysisState):
+    """Runs the specific analysis on the latest transcript."""
+    company_name = state.get('company_name') or state['ticker']
+    transcript = state['file_data'].get('latest_transcript')
+    config = state['agent_config']
+    log_content_accumulator = state['log_file_content']
+
+    result_text = run_earnings_analysis_standalone(company_name, transcript, config)
+
+    log_entry = f"## EARNINGS DECODER: ANALYSIS\n\n{result_text}\n\n---\n"
+    log_content_accumulator += log_entry
+
+    # Store specifically in 'latest_analysis' key
+    current_qual = state.get('qualitative_results') or {}
+    current_qual['latest_analysis'] = result_text
+
+    return {"qualitative_results": current_qual, "log_file_content": log_content_accumulator}
+
 
 # ==============================================================================
-# 4. BUILD GRAPHS
+# 5. BUILD GRAPHS
 # ==============================================================================
 
-# --- A. FULL WORKFLOW GRAPH (Original) ---
+# --- A. FULL WORKFLOW GRAPH ---
 full_workflow = StateGraph(StockAnalysisState)
 full_workflow.add_node("fetch_data", fetch_data_node)
 full_workflow.add_node("quantitative_analysis", quantitative_analysis_node)
@@ -402,7 +435,7 @@ risk_workflow.add_edge("screener_for_risk", "isolated_risk")
 risk_workflow.add_edge("isolated_risk", END)
 risk_only_graph = risk_workflow.compile()
 
-# --- C. SEBI MVP GRAPH (NEW) ---
+# --- C. SEBI MVP GRAPH ---
 sebi_workflow_def = StateGraph(StockAnalysisState)
 sebi_workflow_def.add_node("screener_metadata", screener_metadata_node)
 sebi_workflow_def.add_node("sebi_check", sebi_check_node)
@@ -410,6 +443,15 @@ sebi_workflow_def.set_entry_point("screener_metadata")
 sebi_workflow_def.add_edge("screener_metadata", "sebi_check")
 sebi_workflow_def.add_edge("sebi_check", END)
 sebi_workflow = sebi_workflow_def.compile()
+
+# --- D. EARNINGS DECODER GRAPH (NEW) ---
+earnings_workflow_def = StateGraph(StockAnalysisState)
+earnings_workflow_def.add_node("fetch_latest", screener_latest_transcript_node)
+earnings_workflow_def.add_node("analyze_latest", analyze_latest_transcript_node)
+earnings_workflow_def.set_entry_point("fetch_latest")
+earnings_workflow_def.add_edge("fetch_latest", "analyze_latest")
+earnings_workflow_def.add_edge("analyze_latest", END)
+earnings_graph = earnings_workflow_def.compile()
 
 
 # --- Helper Function for UI ---
@@ -432,7 +474,8 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
         "ticker": ticker_symbol,
         "log_file_content": f"# Analysis Log for {ticker_symbol} (Mode: {workflow_mode})\n\n",
         "is_consolidated": is_consolidated_flag,
-        "agent_config": agent_configs
+        "agent_config": agent_configs,
+        "workflow_mode": workflow_mode
     }
     
     final_state_result = {}
@@ -453,6 +496,14 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
             "sebi_check": status_container.empty()
         }
         placeholders["screener_metadata"].markdown("⏳ **Identifying Company...**")
+
+    elif workflow_mode == "Latest Earnings Decoder":
+        target_graph = earnings_graph
+        placeholders = {
+            "fetch_latest": status_container.empty(),
+            "analyze_latest": status_container.empty()
+        }
+        placeholders["fetch_latest"].markdown("⏳ **Fetching Latest Transcript...**")
     
     else: # Default: Full Workflow
         target_graph = app_graph
@@ -491,6 +542,15 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                     placeholders["sebi_check"].markdown("⏳ **Searching SEBI Database...**")
                  elif node_name == "sebi_check":
                     placeholders["sebi_check"].markdown("✅ **Regulatory Check Complete**")
+
+            elif workflow_mode == "Latest Earnings Decoder":
+                if node_name == "fetch_latest":
+                    c_name = node_output.get("company_name", ticker_symbol)
+                    progress_text_container.write(f"Decoding Earnings for {ticker_symbol} ({c_name})...")
+                    placeholders["fetch_latest"].markdown("✅ **Transcript Downloaded**")
+                    placeholders["analyze_latest"].markdown("⏳ **Decoding Management Speak...**")
+                elif node_name == "analyze_latest":
+                    placeholders["analyze_latest"].markdown("✅ **Analysis Complete**")
             
             else: # Full Workflow Updates
                 if node_name == "fetch_data":
@@ -529,16 +589,17 @@ if 'analysis_results' not in st.session_state:
 
 st.sidebar.header("Controls")
 
-# --- PHASE 0.5 & MVP: MODE SELECTOR ---
+# --- MULTI-MODE WORKFLOW SELECTOR ---
 workflow_mode = st.sidebar.selectbox(
     "Select Workflow",
     [
         "Full Workflow (PDF Report)",
         "Risk Analysis Only",
-        "SEBI Violations Check (MVP)" # New Option
+        "SEBI Violations Check (MVP)",
+        "Latest Earnings Decoder" # <--- NEW OPTION
     ]
 )
-# --------------------------------
+# ------------------------------------
 
 analysis_mode = st.sidebar.radio("Analysis Mode", ["Single Ticker", "Batch Analysis"])
 
@@ -647,31 +708,35 @@ if st.session_state.analysis_results:
     # --- DISPLAY LOGIC BY MODE ---
     
     if run_mode == "SEBI Violations Check (MVP)":
-        # New Display for SEBI Mode
         st.info("SEBI Check Mode: Scanned for official regulatory orders/penalties using live search.")
-        
         st.markdown("### 🏛️ SEBI Regulatory Status")
         qual_res = final_state.get('qualitative_results', {})
         sebi_res = qual_res.get('sebi_check')
-        
-        if sebi_res:
-             st.markdown(sebi_res)
-        else:
-             st.warning("No SEBI check results found.")
-             
+        if sebi_res: st.markdown(sebi_res)
+        else: st.warning("No SEBI check results found.")
         with st.expander("View Execution Logs"):
              if final_state.get('log_file_content'): st.code(final_state['log_file_content'], language='markdown')
 
     elif run_mode == "Risk Analysis Only":
-        # Simplified View for Risk Mode
         st.info("Risk Analysis Mode: Only Credit/Risk data was analyzed.")
-        
         st.markdown("### 🛡️ Credit Risk Profile")
-        if final_state.get('risk_results'):
-             st.markdown(final_state['risk_results'])
+        if final_state.get('risk_results'): st.markdown(final_state['risk_results'])
+        else: st.warning("No risk results found.")
+        with st.expander("View Execution Logs"):
+             if final_state.get('log_file_content'): st.code(final_state['log_file_content'], language='markdown')
+
+    elif run_mode == "Latest Earnings Decoder":
+        st.info("Earnings Decoder Mode: Focused analysis of the most recent quarterly conference call.")
+        
+        qual_res = final_state.get('qualitative_results', {})
+        analysis_text = qual_res.get('latest_analysis')
+        
+        if analysis_text:
+            st.markdown("### 🎙️ Latest Quarter Insights")
+            st.markdown(analysis_text)
         else:
-             st.warning("No risk results found.")
-             
+            st.warning("Analysis could not be generated.")
+
         with st.expander("View Execution Logs"):
              if final_state.get('log_file_content'): st.code(final_state['log_file_content'], language='markdown')
     
