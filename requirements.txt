@@ -37,3 +37,6 @@ lxml
 requests
 beautifulSoup4
 
+tavily-python
+nest_asyncio
+

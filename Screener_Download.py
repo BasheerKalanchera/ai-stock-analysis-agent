@@ -7,7 +7,7 @@ import logging
 import pandas as pd
 import requests
 import platform
-import base64 # Required for JS injection fallback
+import base64 
 
 # --- IMPORTS ---
 import undetected_chromedriver as uc
@@ -74,17 +74,20 @@ def download_financial_data(
     need_transcripts: bool = True,
     need_ppt: bool = True,
     need_credit_report: bool = True,
-    need_peers: bool = True
+    need_peers: bool = True,
+    # --- New Flag for SEBI MVP ---
+    metadata_only: bool = False
 ) -> Tuple[Optional[str], Dict[str, Any], pd.DataFrame]:
     
     email = config["SCREENER_EMAIL"]
     password = config["SCREENER_PASSWORD"]
     
-    logger.info(f"Starting download for {ticker} | Excel={need_excel}, Credit={need_credit_report}, Peers={need_peers}...")
+    logger.info(f"Starting download for {ticker} | Metadata Only={metadata_only}...")
     
     temp_download_dir = os.path.join(os.getcwd(), "temp_downloads")
     os.makedirs(temp_download_dir, exist_ok=True)
 
+    # ... (Rest of chrome options logic remains identical) ...
     def get_chrome_options():
         opts = uc.ChromeOptions()
         prefs = {
@@ -108,7 +111,6 @@ def download_financial_data(
             opts.add_argument("--window-size=1920,1080")
         else:
             opts.add_argument("--window-size=1920,1080")
-            # If you are testing headless locally, you can uncomment this:
             opts.add_argument("--headless=new") 
         
         return opts
@@ -167,8 +169,21 @@ def download_financial_data(
             # --- ALWAYS FETCH COMPANY NAME ---
             wait.until(EC.presence_of_element_located((By.ID, "top-ratios")))
             company_name = wait.until(EC.visibility_of_element_located((By.XPATH, "//h1[contains(@class, 'margin-0')]"))).text.strip()
+            logger.info(f"✅ Company Identified: {company_name}")
+
+            # --- SEBI MVP SHORT CIRCUIT ---
+            if metadata_only:
+                logger.info("🛑 Metadata Only Mode: Skipping heavy downloads.")
+                driver.quit()
+                return company_name, {}, pd.DataFrame()
+            # ----------------------------
 
             # --- EXCEL ---
+            if need_excel:
+               # ... (Original Excel logic) ...
+               pass 
+            # (Rest of the function continues as is for full download logic)
+
             if need_excel:
                 logger.info("Downloading Excel...")
                 files_before = os.listdir(temp_download_dir)
@@ -211,6 +226,7 @@ def download_financial_data(
 
             # --- PPT SEARCH ---
             if need_ppt:
+                # ... (Original PPT Logic) ...
                 logger.info("Scanning for Investor Presentation (PPT)...")
                 # Ensure we are on the documents tab/hash if needed, though usually one page
                 driver.get(f"https://www.screener.in/company/{ticker}/#documents")
@@ -313,6 +329,7 @@ def download_financial_data(
 
             # --- CREDIT RATINGS ---
             if need_credit_report:
+                 # ... (Original Credit Logic) ...
                 logger.info("Checking for Credit Ratings...")
                 try:
                     if "documents" not in driver.current_url:
@@ -373,12 +390,13 @@ def download_financial_data(
 
             # --- TRANSCRIPTS ---
             if need_transcripts:
+                # ... (Original Transcript Logic) ...
                 logger.info("Scanning for Concall Transcripts...")
                 try:
                     if "documents" not in driver.current_url:
                         driver.get(f"https://www.screener.in/company/{ticker}/#documents")
 
-                    transcripts_xpath = "//h3[normalize-space()='Concalls']/following::a[contains(@class, 'concall-link') and contains(text(),'Transcript')]"
+                    transcripts_xpath = "//h3[normalize-space()='Concalls']/following::a[contains(@class, 'concall-link') and contains(text(), 'Transcript')]"
                     transcript_elements = driver.find_elements(By.XPATH, transcripts_xpath)
                     
                     transcript_urls = [elem.get_attribute('href') for elem in transcript_elements if elem]

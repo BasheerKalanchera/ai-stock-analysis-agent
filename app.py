@@ -14,7 +14,8 @@ from langgraph.graph import StateGraph, END
 
 # --- Import Agent Functions ---
 from Screener_Download import download_financial_data
-from qualitative_analysis_agent import run_qualitative_analysis
+# Note: Added run_isolated_sebi_check to imports
+from qualitative_analysis_agent import run_qualitative_analysis, run_isolated_sebi_check
 from quantitative_agent import analyze_financials
 from valuation_agent import run_valuation_analysis
 from synthesis_agent import generate_investment_summary
@@ -29,26 +30,16 @@ from risk_agent import risk_analyst_agent
 st.set_page_config(page_title="AI Stock Analysis Crew", page_icon="🤖", layout="wide")
 load_dotenv()
 
-# --- CENTRALIZED SECRET & CONFIGURATION HANDLING ---
+# ... (Configuration, Secret Handling, and Resilience Logic - execute_with_fallback - remain exactly as provided) ...
 
 def get_secret(key, default=None):
-    """
-    Safely retrieves config from st.secrets (Cloud) or os.getenv (Local).
-    Silences Pylance errors and handles missing local secrets.toml files.
-    """
     try:
-        # Try finding the key in Streamlit secrets first
-        # We use .get() to avoid KeyError if the key is missing in the file
         return st.secrets.get(key, os.getenv(key, default))
     except (FileNotFoundError, KeyError, st.errors.StreamlitAPIException):
-        # If secrets.toml doesn't exist (Local) or any other read error,
-        # fallback strictly to .env
         return os.getenv(key, default)
 
-# Determine environment status safely
 is_cloud_env = False
 try:
-    # Just checking existence prevents crash, but confirms if secrets are loaded
     if st.secrets: 
         is_cloud_env = True
 except (FileNotFoundError, st.errors.StreamlitAPIException):
@@ -58,28 +49,15 @@ agent_configs = {
     "SCREENER_EMAIL": get_secret("SCREENER_EMAIL"),
     "SCREENER_PASSWORD": get_secret("SCREENER_PASSWORD"),
     "GOOGLE_API_KEY": get_secret("GOOGLE_API_KEY"),
-    
-    # --- MODEL CONFIGURATION ---
     "LITE_MODEL_NAME": get_secret("LITE_MODEL_NAME", "gemini-2.5-flash-lite"),
     "HEAVY_MODEL_NAME": get_secret("HEAVY_MODEL_NAME", "gemini-2.5-flash"),
-    
-    # 3. FALLBACK: High Volume (For Daily Request Limits / RPD)
     "FALLBACK_REQUEST_MODEL": "gemini-2.5-flash-lite", 
-    
-    # 4. FALLBACK: High Capacity (For Token Limits / TPM)
     "FALLBACK_TOKEN_MODEL": "gemini-2.0-flash",
-    
+    "TAVILY_API_KEY": get_secret("TAVILY_API_KEY"),
     "IS_CLOUD_ENV": is_cloud_env
 }
 
-# --- RESILIENCE LOGIC: THE SMART FALLBACK WRAPPER ---
 def execute_with_fallback(func, log_accumulator, agent_name, *args, **kwargs):
-    """
-    Executes an agent function with Smart Error Handling.
-    - If Token Limit hit -> Switches to Gemini 2.0 Flash (1M TPM)
-    - If Request Limit hit -> Switches to Gemini 2.5 Flash Lite (High RPM)
-    """
-    # 1. Get the current config
     config = kwargs.get('config')
     if not config and len(args) > 0 and isinstance(args[-1], dict):
         config = args[-1]
@@ -88,51 +66,31 @@ def execute_with_fallback(func, log_accumulator, agent_name, *args, **kwargs):
         return func(*args, **kwargs)
 
     try:
-        # ATTEMPT 1: Run with original config
         return func(*args, **kwargs)
-    
     except Exception as e:
         error_str = str(e).lower()
-        
-        # Catch Rate Limits (429) or Quota Exceeded
         if "429" in error_str or "quota" in error_str or "resource exhausted" in error_str:
-            
-            # --- DECISION LOGIC: WHICH FALLBACK? ---
             if "token" in error_str:
-                # TPM (Token Per Minute) Limit Hit
                 fallback_model = agent_configs['FALLBACK_TOKEN_MODEL']
                 reason_msg = "Token Limit (TPM)"
             else:
-                # RPD (Request Per Day) or RPM Limit Hit
                 fallback_model = agent_configs['FALLBACK_REQUEST_MODEL']
                 reason_msg = "Request Limit (RPD/RPM)"
-            # ---------------------------------------
 
-            # Create a Modified Config
             backup_config = copy.deepcopy(config)
-            # Force ALL model keys to use the fallback to ensure the agent picks it up
             backup_config['LITE_MODEL_NAME'] = fallback_model
             backup_config['HEAVY_MODEL_NAME'] = fallback_model
             
-            # Update args/kwargs with new config
-            if 'config' in kwargs:
-                kwargs['config'] = backup_config
+            if 'config' in kwargs: kwargs['config'] = backup_config
             new_args = list(args)
-            if len(new_args) > 0 and isinstance(new_args[-1], dict):
-                new_args[-1] = backup_config
+            if len(new_args) > 0 and isinstance(new_args[-1], dict): new_args[-1] = backup_config
             
-            # Wait a moment for the bucket to drain slightly
             time.sleep(5)
-            
             try:
-                # ATTEMPT 2: Run with Fallback Config
                 return func(*tuple(new_args), **kwargs)
             except Exception as e2:
-                # If even the fallback fails, return a safe failure string
                 return f"❌ Agent {agent_name} Failed after Retry ({reason_msg}): {str(e2)}"
-        
         else:
-            # If it's a code error (not API limit), raise it normally
             raise e
 
 # --- Define Graph State ---
@@ -163,7 +121,6 @@ def fetch_data_node(state: StockAnalysisState):
     config = state['agent_config']
     log_content_accumulator = state.get('log_file_content', "")
 
-    # Default call (gets everything)
     company_name, file_data, peer_data = download_financial_data(ticker, config, is_consolidated)
     
     timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -182,6 +139,7 @@ def fetch_data_node(state: StockAnalysisState):
     return {"company_name": company_name, "file_data": file_data, "peer_data": peer_data, "log_file_content": log_content_accumulator}
 
 def quantitative_analysis_node(state: StockAnalysisState):
+    # ... (Same as provided) ...
     excel_data = state['file_data'].get('excel')
     log_content_accumulator = state['log_file_content']
     config = state['agent_config']
@@ -194,7 +152,6 @@ def quantitative_analysis_node(state: StockAnalysisState):
             analyze_financials, log_content_accumulator, "Quantitative",
             excel_data, state['ticker'], config
         )
-        
         if isinstance(structured_results, str):
              text_results = structured_results
              structured_results = [{"type": "text", "content": text_results}]
@@ -205,11 +162,11 @@ def quantitative_analysis_node(state: StockAnalysisState):
     return {"quant_results_structured": structured_results, "quant_text_for_synthesis": text_results, "log_file_content": log_content_accumulator}
 
 def strategy_analysis_node(state: StockAnalysisState):
+    # ... (Same as provided) ...
     log_content_accumulator = state['log_file_content']
     config = state['agent_config']
     
     def strategy_wrapper(f_data, cfg):
-        # Uses HEAVY model by default, or FALLBACK if cfg is swapped
         model_to_use = cfg.get("LITE_MODEL_NAME") 
         return strategy_analyst_agent(f_data, cfg["GOOGLE_API_KEY"], model_to_use)
 
@@ -222,6 +179,7 @@ def strategy_analysis_node(state: StockAnalysisState):
     return {"strategy_results": result_text, "log_file_content": log_content_accumulator}
 
 def risk_analysis_node(state: StockAnalysisState):
+    # ... (Same as provided) ...
     log_content_accumulator = state['log_file_content']
     config = state['agent_config']
     
@@ -238,6 +196,7 @@ def risk_analysis_node(state: StockAnalysisState):
     return {"risk_results": result_text, "log_file_content": log_content_accumulator}
 
 def qualitative_analysis_node(state: StockAnalysisState):
+    # ... (Same as provided) ...
     company = state['company_name'] or state['ticker']
     log_content_accumulator = state['log_file_content']
     config = state['agent_config']
@@ -250,8 +209,8 @@ def qualitative_analysis_node(state: StockAnalysisState):
         state['file_data'].get("latest_transcript"),
         state['file_data'].get("previous_transcript"),
         config,
-        strategy_context=strategy_ctx,
-        risk_context=risk_ctx
+        strat=strategy_ctx,   # <--- CHANGED from strategy_context
+        risk=risk_ctx         # <--- CHANGED from risk_context
     )
     
     log_entry = "## AGENT 5: QUALITATIVE ANALYSIS\n\n"
@@ -266,6 +225,7 @@ def qualitative_analysis_node(state: StockAnalysisState):
     return {"qualitative_results": results if isinstance(results, dict) else {}, "log_file_content": log_content_accumulator}
 
 def valuation_analysis_node(state: StockAnalysisState):
+    # ... (Same as provided) ...
     ticker = state['ticker']
     company_name = state.get('company_name') 
     peer_data = state.get('peer_data')
@@ -283,6 +243,7 @@ def valuation_analysis_node(state: StockAnalysisState):
     return {"valuation_results": results if isinstance(results, dict) else {}, "log_file_content": log_content_accumulator}
 
 def synthesis_node(state: StockAnalysisState):
+    # ... (Same as provided) ...
     log_content_accumulator = state['log_file_content']
     config = state['agent_config']
     quant_text = state.get('quant_text_for_synthesis', "Quantitative analysis was not performed.")
@@ -302,6 +263,7 @@ def synthesis_node(state: StockAnalysisState):
     return {"final_report": report, "log_file_content": log_content_accumulator}
 
 def generate_report_node(state: StockAnalysisState):
+    # ... (Same as provided) ...
     pdf_buffer = io.BytesIO()
     create_pdf_report(
         ticker=state['ticker'],
@@ -322,29 +284,18 @@ def delay_node(state: StockAnalysisState):
     return {}
 
 # ==============================================================================
-# 2. NEW NODES FOR PHASE 0.5 (Risk Only)
+# 2. RISK NODES (Phase 0.5)
 # ==============================================================================
-
 def screener_for_risk_node(state: StockAnalysisState):
-    """
-    Downloads ONLY what is needed for Risk Analysis (Credit Report).
-    Optimized to save time and bandwidth.
-    """
+    # ... (Same as provided) ...
     ticker = state['ticker']
     is_consolidated = state['is_consolidated']
     config = state['agent_config']
     log_content_accumulator = state.get('log_file_content', "")
 
-    # Phase 0.5 Flag Usage
     company_name, file_data, peer_data = download_financial_data(
-        ticker, 
-        config, 
-        is_consolidated,
-        need_excel=False,
-        need_transcripts=False,
-        need_ppt=False,
-        need_peers=False,
-        need_credit_report=True 
+        ticker, config, is_consolidated,
+        need_excel=False, need_transcripts=False, need_ppt=False, need_peers=False, need_credit_report=True 
     )
     
     timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -353,13 +304,10 @@ def screener_for_risk_node(state: StockAnalysisState):
                  f"**Credit Rating Doc**: {'Downloaded' if file_data.get('credit_rating_doc') else 'Failed/Not Found'}\n---\n")
     
     log_content_accumulator += log_entry
-        
     return {"company_name": company_name, "file_data": file_data, "log_file_content": log_content_accumulator}
 
 def isolated_risk_node(state: StockAnalysisState):
-    """
-    Runs the Risk Agent in isolation.
-    """
+    # ... (Same as provided) ...
     log_content_accumulator = state['log_file_content']
     config = state['agent_config']
     
@@ -375,9 +323,50 @@ def isolated_risk_node(state: StockAnalysisState):
     log_content_accumulator += f"## PHASE 0.5: ISOLATED RISK ANALYSIS\n\n{result_text}\n\n---\n\n"
     return {"risk_results": result_text, "log_file_content": log_content_accumulator}
 
+# ==============================================================================
+# 3. SEBI MVP NODES (NEW)
+# ==============================================================================
+
+def screener_metadata_node(state: StockAnalysisState):
+    """
+    Lightweight Node: Fetches ONLY the company name to ground the SEBI check.
+    """
+    ticker = state['ticker']
+    config = state['agent_config']
+    log_content_accumulator = state.get('log_file_content', "")
+
+    # Call Screener with metadata_only=True
+    company_name, _, _ = download_financial_data(
+        ticker, config, metadata_only=True
+    )
+
+    log_entry = f"## SEBI MVP: METADATA for {ticker}\n\n**Company Name**: {company_name}\n\n---\n"
+    log_content_accumulator += log_entry
+    
+    return {"company_name": company_name, "log_file_content": log_content_accumulator}
+
+def sebi_check_node(state: StockAnalysisState):
+    """
+    Runs the Live SEBI Violation Check.
+    """
+    company_name = state.get('company_name') or state['ticker']
+    config = state['agent_config']
+    log_content_accumulator = state.get('log_file_content', "")
+
+    result_text = run_isolated_sebi_check(company_name, config)
+
+    log_entry = f"## SEBI MVP: REGULATORY CHECK\n\n{result_text}\n\n---\n"
+    log_content_accumulator += log_entry
+
+    # We store the result in qualitative_results for easy access in the UI
+    current_qual = state.get('qualitative_results') or {}
+    current_qual['sebi_check'] = result_text
+
+    return {"qualitative_results": current_qual, "log_file_content": log_content_accumulator}
+
 
 # ==============================================================================
-# 3. BUILD GRAPHS
+# 4. BUILD GRAPHS
 # ==============================================================================
 
 # --- A. FULL WORKFLOW GRAPH (Original) ---
@@ -396,27 +385,31 @@ full_workflow.add_node("generate_report", generate_report_node)
 full_workflow.set_entry_point("fetch_data")
 full_workflow.add_edge("fetch_data", "quantitative_analysis")
 full_workflow.add_edge("quantitative_analysis", "strategy_analysis")
-# workflow.add_edge("delay_before_strategy", "strategy_analysis")
 full_workflow.add_edge("strategy_analysis", "risk_analysis")
-# workflow.add_edge("delay_before_risk", "risk_analysis")
 full_workflow.add_edge("risk_analysis", "qualitative_analysis")
 full_workflow.add_edge("qualitative_analysis", "valuation_analysis")
 full_workflow.add_edge("valuation_analysis", "synthesis")
 full_workflow.add_edge("synthesis", "generate_report")
 full_workflow.add_edge("generate_report", END)
-
 app_graph = full_workflow.compile()
 
-# --- B. RISK ONLY GRAPH (Phase 0.5) ---
+# --- B. RISK ONLY GRAPH ---
 risk_workflow = StateGraph(StockAnalysisState)
 risk_workflow.add_node("screener_for_risk", screener_for_risk_node)
 risk_workflow.add_node("isolated_risk", isolated_risk_node)
-
 risk_workflow.set_entry_point("screener_for_risk")
 risk_workflow.add_edge("screener_for_risk", "isolated_risk")
 risk_workflow.add_edge("isolated_risk", END)
-
 risk_only_graph = risk_workflow.compile()
+
+# --- C. SEBI MVP GRAPH (NEW) ---
+sebi_workflow_def = StateGraph(StockAnalysisState)
+sebi_workflow_def.add_node("screener_metadata", screener_metadata_node)
+sebi_workflow_def.add_node("sebi_check", sebi_check_node)
+sebi_workflow_def.set_entry_point("screener_metadata")
+sebi_workflow_def.add_edge("screener_metadata", "sebi_check")
+sebi_workflow_def.add_edge("sebi_check", END)
+sebi_workflow = sebi_workflow_def.compile()
 
 
 # --- Helper Function for UI ---
@@ -452,6 +445,14 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
             "isolated_risk": status_container.empty(),
         }
         placeholders["screener_for_risk"].markdown("⏳ **Checking Credit Ratings...**")
+
+    elif workflow_mode == "SEBI Violations Check (MVP)":
+        target_graph = sebi_workflow
+        placeholders = {
+            "screener_metadata": status_container.empty(),
+            "sebi_check": status_container.empty()
+        }
+        placeholders["screener_metadata"].markdown("⏳ **Identifying Company...**")
     
     else: # Default: Full Workflow
         target_graph = app_graph
@@ -481,6 +482,15 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                     placeholders["isolated_risk"].markdown("⏳ **Generating Risk Profile...**")
                 elif node_name == "isolated_risk":
                     placeholders["isolated_risk"].markdown("✅ **Risk Analysis Complete**")
+
+            elif workflow_mode == "SEBI Violations Check (MVP)":
+                 if node_name == "screener_metadata":
+                    c_name = node_output.get("company_name", ticker_symbol)
+                    progress_text_container.write(f"Checking SEBI for {ticker_symbol} ({c_name})...")
+                    placeholders["screener_metadata"].markdown("✅ **Company Identified**")
+                    placeholders["sebi_check"].markdown("⏳ **Searching SEBI Database...**")
+                 elif node_name == "sebi_check":
+                    placeholders["sebi_check"].markdown("✅ **Regulatory Check Complete**")
             
             else: # Full Workflow Updates
                 if node_name == "fetch_data":
@@ -519,12 +529,13 @@ if 'analysis_results' not in st.session_state:
 
 st.sidebar.header("Controls")
 
-# --- PHASE 0.5: MODE SELECTOR ---
+# --- PHASE 0.5 & MVP: MODE SELECTOR ---
 workflow_mode = st.sidebar.selectbox(
     "Select Workflow",
     [
         "Full Workflow (PDF Report)",
-        "Risk Analysis Only"
+        "Risk Analysis Only",
+        "SEBI Violations Check (MVP)" # New Option
     ]
 )
 # --------------------------------
@@ -597,7 +608,7 @@ if st.sidebar.button("🚀 Run Analysis", type="primary"):
 if st.session_state.analysis_results:
     st.divider()
 
-    # Batch Download
+    # Batch Download (Only for Full Mode)
     if len(st.session_state.analysis_results) > 0:
         zip_buffer = io.BytesIO()
         has_pdfs = False
@@ -609,8 +620,6 @@ if st.session_state.analysis_results:
                     filename = f"Report_{ticker}_{timestamp}.pdf"
                     zf.writestr(filename, state['pdf_report_bytes'])
 
-        # Only show ZIP download if there are PDF bytes to download (Full Mode)
-        # In Risk-only mode, we won't have PDFs, so this button logically hides itself or we can check the mode.
         if has_pdfs:
             st.download_button(
                 label="📦 **Download All Reports (ZIP)**",
@@ -637,7 +646,23 @@ if st.session_state.analysis_results:
 
     # --- DISPLAY LOGIC BY MODE ---
     
-    if run_mode == "Risk Analysis Only":
+    if run_mode == "SEBI Violations Check (MVP)":
+        # New Display for SEBI Mode
+        st.info("SEBI Check Mode: Scanned for official regulatory orders/penalties using live search.")
+        
+        st.markdown("### 🏛️ SEBI Regulatory Status")
+        qual_res = final_state.get('qualitative_results', {})
+        sebi_res = qual_res.get('sebi_check')
+        
+        if sebi_res:
+             st.markdown(sebi_res)
+        else:
+             st.warning("No SEBI check results found.")
+             
+        with st.expander("View Execution Logs"):
+             if final_state.get('log_file_content'): st.code(final_state['log_file_content'], language='markdown')
+
+    elif run_mode == "Risk Analysis Only":
         # Simplified View for Risk Mode
         st.info("Risk Analysis Mode: Only Credit/Risk data was analyzed.")
         
