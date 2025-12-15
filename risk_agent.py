@@ -3,7 +3,7 @@ import io
 import logging
 import time
 import random
-import re # Added for parsing error messages
+import re
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
 from pypdf import PdfReader  # Requires: pip install pypdf
@@ -37,7 +37,6 @@ def generate_with_retry(model, prompt, max_retries=3, base_delay=30):
             if retry_seconds == base_delay:
                 retry_seconds = base_delay + random.uniform(1, 5)
 
-            # CLEAN ONE-LINE LOG
             logger.warning(f"Generation (Attempt {attempt + 1}/{max_retries}) encountered rate limit - retry after {retry_seconds:.1f} seconds.")
             time.sleep(retry_seconds)
             
@@ -51,12 +50,38 @@ def generate_with_retry(model, prompt, max_retries=3, base_delay=30):
                 
     raise Exception(f"Max retries ({max_retries}) exceeded. The API is too busy.")
 
+def validate_pdf_header(file_buffer):
+    """
+    Simple check to ensure the file buffer actually starts with %PDF.
+    Prevents crashes when the downloader returns an HTML error page instead of a PDF.
+    """
+    if not file_buffer:
+        return False
+    try:
+        # Remember current position
+        pos = file_buffer.tell()
+        file_buffer.seek(0)
+        header = file_buffer.read(4)
+        # Reset position for the next reader
+        file_buffer.seek(pos)
+        
+        # Check for standard PDF signature
+        return header == b'%PDF'
+    except Exception:
+        return False
+
 def extract_text_from_buffer(buffer, file_type):
     """Extracts clean text from BytesIO (PDF) or returns String (HTML)."""
     if file_type == 'html':
         return buffer  # It's already a string
     
     if file_type == 'pdf':
+        # --- NEW VALIDATION CHECK ---
+        if not validate_pdf_header(buffer):
+            logger.error("❌ PDF Extraction failed: Invalid file header (Not a PDF). Likely an HTML error page.")
+            return ""
+        # ----------------------------
+
         try:
             reader = PdfReader(buffer)
             text = ""
@@ -84,7 +109,7 @@ def risk_analyst_agent(file_buffers, api_key, model_name):
     raw_text = extract_text_from_buffer(doc, doc_type)
     
     if not raw_text or len(raw_text) < 100:
-        return "### Risk Profile\n\n*Credit Rating found, but text extraction failed or file was empty.*"
+        return "### Risk Profile\n\n*Credit Rating found, but text extraction failed (Invalid PDF or Empty File).*"
 
     context_text = raw_text
     

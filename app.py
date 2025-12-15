@@ -8,17 +8,19 @@ import time
 import pandas as pd
 import zipfile
 import copy
+import json 
 
 # --- LangGraph Imports ---
 from langgraph.graph import StateGraph, END
 
 # --- Import Agent Functions ---
 from Screener_Download import download_financial_data
-# Note: Added run_earnings_analysis_standalone to imports
+# Updated imports to include the new standalone comparison function
 from qualitative_analysis_agent import (
     run_qualitative_analysis, 
     run_isolated_sebi_check, 
-    run_earnings_analysis_standalone
+    run_earnings_analysis_standalone,
+    run_comparison_standalone
 )
 from quantitative_agent import analyze_financials
 from valuation_agent import run_valuation_analysis
@@ -354,7 +356,7 @@ def sebi_check_node(state: StockAnalysisState):
     return {"qualitative_results": current_qual, "log_file_content": log_content_accumulator}
 
 # ==============================================================================
-# 4. EARNINGS DECODER NODES (NEW MVP)
+# 4a. EARNINGS DECODER NODES (MVP)
 # ==============================================================================
 
 def screener_latest_transcript_node(state: StockAnalysisState):
@@ -363,8 +365,6 @@ def screener_latest_transcript_node(state: StockAnalysisState):
     config = state['agent_config']
     log_content_accumulator = state.get('log_file_content', "")
 
-    # For now, we reuse the standard downloader but ignore unnecessary files in logic
-    # Ideally, you would optimize download_financial_data to support 'latest_only=True'
     company_name, file_data, _ = download_financial_data(
         ticker, config, 
         need_excel=False, 
@@ -386,7 +386,8 @@ def analyze_latest_transcript_node(state: StockAnalysisState):
     config = state['agent_config']
     log_content_accumulator = state['log_file_content']
 
-    result_text = run_earnings_analysis_standalone(company_name, transcript, config)
+    # Update: Pass 'Latest' label
+    result_text = run_earnings_analysis_standalone(company_name, transcript, config, quarter_label="Latest")
 
     log_entry = f"## EARNINGS DECODER: ANALYSIS\n\n{result_text}\n\n---\n"
     log_content_accumulator += log_entry
@@ -396,6 +397,82 @@ def analyze_latest_transcript_node(state: StockAnalysisState):
     current_qual['latest_analysis'] = result_text
 
     return {"qualitative_results": current_qual, "log_file_content": log_content_accumulator}
+
+# ==============================================================================
+# 4b. STRATEGIC SHIFT NODES (NEW - Phase 3)
+# ==============================================================================
+
+def screener_both_transcripts_node(state: StockAnalysisState):
+    """Downloads BOTH latest and previous transcripts."""
+    ticker = state['ticker']
+    config = state['agent_config']
+    log_content_accumulator = state.get('log_file_content', "")
+
+    company_name, file_data, _ = download_financial_data(
+        ticker, config, 
+        need_excel=False, 
+        need_ppt=False, 
+        need_peers=False, 
+        need_credit_report=False
+    )
+
+    l_status = "Downloaded" if file_data.get('latest_transcript') else "Not Found"
+    p_status = "Downloaded" if file_data.get('previous_transcript') else "Not Found"
+
+    log_entry = (f"## STRATEGIC SHIFT: DOWNLOAD\n\n"
+                 f"**Latest Transcript**: {l_status}\n"
+                 f"**Previous Transcript**: {p_status}\n\n---\n")
+    log_content_accumulator += log_entry
+    
+    return {"company_name": company_name, "file_data": file_data, "log_file_content": log_content_accumulator}
+
+def analyze_both_transcripts_node(state: StockAnalysisState):
+    """Analyzes both transcripts individually to prepare for comparison."""
+    company_name = state.get('company_name') or state['ticker']
+    latest_pdf = state['file_data'].get('latest_transcript')
+    previous_pdf = state['file_data'].get('previous_transcript')
+    config = state['agent_config']
+    log_content_accumulator = state['log_file_content']
+    
+    current_qual = state.get('qualitative_results') or {}
+
+    # 1. Analyze Latest (Updated: Pass label)
+    if latest_pdf:
+        latest_res = run_earnings_analysis_standalone(company_name, latest_pdf, config, quarter_label="Latest")
+    else:
+        latest_res = "No latest transcript available."
+    
+    # 2. Analyze Previous (Updated: Pass label)
+    if previous_pdf:
+        previous_res = run_earnings_analysis_standalone(company_name, previous_pdf, config, quarter_label="Previous")
+    else:
+        previous_res = "No previous transcript available."
+
+    current_qual['latest_analysis'] = latest_res
+    current_qual['previous_analysis'] = previous_res
+
+    log_entry = f"## STRATEGIC SHIFT: INDIVIDUAL ANALYSIS\n\n**Latest Status**: Done\n**Previous Status**: Done\n\n---\n"
+    log_content_accumulator += log_entry
+
+    return {"qualitative_results": current_qual, "log_file_content": log_content_accumulator}
+
+def compare_quarters_node(state: StockAnalysisState):
+    """Runs the comparison agent using the two summaries generated above."""
+    config = state['agent_config']
+    log_content_accumulator = state['log_file_content']
+    qual_res = state.get('qualitative_results', {})
+    
+    latest_txt = qual_res.get('latest_analysis')
+    prev_txt = qual_res.get('previous_analysis')
+    
+    comparison_json = run_comparison_standalone(latest_txt, prev_txt, config)
+    
+    qual_res['qoq_comparison'] = comparison_json
+    
+    log_entry = f"## STRATEGIC SHIFT: COMPARISON\n\n{comparison_json}\n\n---\n"
+    log_content_accumulator += log_entry
+    
+    return {"qualitative_results": qual_res, "log_file_content": log_content_accumulator}
 
 
 # ==============================================================================
@@ -444,7 +521,7 @@ sebi_workflow_def.add_edge("screener_metadata", "sebi_check")
 sebi_workflow_def.add_edge("sebi_check", END)
 sebi_workflow = sebi_workflow_def.compile()
 
-# --- D. EARNINGS DECODER GRAPH (NEW) ---
+# --- D. EARNINGS DECODER GRAPH ---
 earnings_workflow_def = StateGraph(StockAnalysisState)
 earnings_workflow_def.add_node("fetch_latest", screener_latest_transcript_node)
 earnings_workflow_def.add_node("analyze_latest", analyze_latest_transcript_node)
@@ -452,6 +529,19 @@ earnings_workflow_def.set_entry_point("fetch_latest")
 earnings_workflow_def.add_edge("fetch_latest", "analyze_latest")
 earnings_workflow_def.add_edge("analyze_latest", END)
 earnings_graph = earnings_workflow_def.compile()
+
+# --- E. STRATEGIC SHIFT GRAPH (NEW) ---
+strategy_shift_workflow_def = StateGraph(StockAnalysisState)
+strategy_shift_workflow_def.add_node("fetch_both", screener_both_transcripts_node)
+strategy_shift_workflow_def.add_node("analyze_both", analyze_both_transcripts_node)
+strategy_shift_workflow_def.add_node("compare_quarters", compare_quarters_node)
+
+strategy_shift_workflow_def.set_entry_point("fetch_both")
+strategy_shift_workflow_def.add_edge("fetch_both", "analyze_both")
+strategy_shift_workflow_def.add_edge("analyze_both", "compare_quarters")
+strategy_shift_workflow_def.add_edge("compare_quarters", END)
+
+strategy_shift_graph = strategy_shift_workflow_def.compile()
 
 
 # --- Helper Function for UI ---
@@ -505,6 +595,15 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
         }
         placeholders["fetch_latest"].markdown("⏳ **Fetching Latest Transcript...**")
     
+    elif workflow_mode == "Strategic Shift Analyzer (QoQ)":
+        target_graph = strategy_shift_graph
+        placeholders = {
+            "fetch_both": status_container.empty(),
+            "analyze_both": status_container.empty(),
+            "compare_quarters": status_container.empty()
+        }
+        placeholders["fetch_both"].markdown("⏳ **Fetching History...**")
+
     else: # Default: Full Workflow
         target_graph = app_graph
         placeholders = {
@@ -552,6 +651,18 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                 elif node_name == "analyze_latest":
                     placeholders["analyze_latest"].markdown("✅ **Analysis Complete**")
             
+            elif workflow_mode == "Strategic Shift Analyzer (QoQ)":
+                if node_name == "fetch_both":
+                    c_name = node_output.get("company_name", ticker_symbol)
+                    progress_text_container.write(f"Analyzing Shift for {ticker_symbol} ({c_name})...")
+                    placeholders["fetch_both"].markdown("✅ **Transcripts Retrieved**")
+                    placeholders["analyze_both"].markdown("⏳ **Reading Both Quarters...**")
+                elif node_name == "analyze_both":
+                    placeholders["analyze_both"].markdown("✅ **Individual Analysis Done**")
+                    placeholders["compare_quarters"].markdown("⏳ **Detecting Strategic Shifts...**")
+                elif node_name == "compare_quarters":
+                    placeholders["compare_quarters"].markdown("✅ **Comparison Complete**")
+            
             else: # Full Workflow Updates
                 if node_name == "fetch_data":
                     c_name = node_output.get("company_name", ticker_symbol)
@@ -596,7 +707,8 @@ workflow_mode = st.sidebar.selectbox(
         "Full Workflow (PDF Report)",
         "Risk Analysis Only",
         "SEBI Violations Check (MVP)",
-        "Latest Earnings Decoder" # <--- NEW OPTION
+        "Latest Earnings Decoder",
+        "Strategic Shift Analyzer (QoQ)" # <--- NEW OPTION
     ]
 )
 # ------------------------------------
@@ -736,6 +848,57 @@ if st.session_state.analysis_results:
             st.markdown(analysis_text)
         else:
             st.warning("Analysis could not be generated.")
+
+        with st.expander("View Execution Logs"):
+             if final_state.get('log_file_content'): st.code(final_state['log_file_content'], language='markdown')
+
+    elif run_mode == "Strategic Shift Analyzer (QoQ)":
+        st.info("Strategic Shift Mode: Comparing the two most recent earnings calls to detect changes in tone, strategy, and outlook.")
+        
+        qual_res = final_state.get('qualitative_results', {})
+        comp_json_str = qual_res.get('qoq_comparison')
+        
+        if comp_json_str:
+            import json
+            try:
+                # The agent might return a string with json markdown, clean it
+                clean_json = comp_json_str.replace("```json", "").replace("```", "").strip()
+                comparison_data = json.loads(clean_json)
+                
+                st.subheader("📊 Strategic Shift Matrix")
+                
+                # Convert list of dicts to DataFrame for clean display
+                df_compare = pd.DataFrame(comparison_data)
+                
+                # Header
+                st.markdown("---")
+                c1, c2, c3 = st.columns([1, 2, 2])
+                c1.markdown("**Metric**")
+                c2.markdown("**📉 Previous Quarter**")
+                c3.markdown("**📈 Latest Quarter**")
+                st.divider()
+                
+                for index, row in df_compare.iterrows():
+                    metric = row.get("Metric", "N/A")
+                    prev_val = row.get("Previous Quarter Analysis", "N/A")
+                    curr_val = row.get("Latest Quarter Analysis", "N/A")
+                    
+                    c1, c2, c3 = st.columns([1, 2, 2])
+                    with c1: st.markdown(f"**{metric}**")
+                    with c2: st.markdown(prev_val)
+                    with c3: st.markdown(curr_val)
+                    st.divider()
+                    
+            except Exception as e:
+                st.error(f"Could not parse comparison data: {e}")
+                st.text(comp_json_str) # Fallback raw text
+        else:
+            st.warning("Comparison data could not be generated.")
+
+        with st.expander("View Underlying Analyses"):
+            tab_l, tab_p = st.tabs(["Latest Quarter Raw", "Previous Quarter Raw"])
+            with tab_l: st.markdown(qual_res.get('latest_analysis', 'N/A'))
+            with tab_p: st.markdown(qual_res.get('previous_analysis', 'N/A'))
 
         with st.expander("View Execution Logs"):
              if final_state.get('log_file_content'): st.code(final_state['log_file_content'], language='markdown')

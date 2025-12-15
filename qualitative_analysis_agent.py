@@ -504,16 +504,17 @@ def run_qualitative_analysis(company_name, latest, previous, config, strat="", r
 def run_isolated_sebi_check(company_name, agent_config):
     return _sebi_sync(company_name, agent_config)
 
-def run_earnings_analysis_standalone(company_name, transcript_buffer, config):
+def run_earnings_analysis_standalone(company_name, transcript_buffer, config, quarter_label="Generic"):
     """
     Standalone runner for the 'Latest Earnings Decoder' app.
     Synchronous execution for a single PDF.
+    Now supports a 'quarter_label' to customize logging (e.g., 'Latest', 'Previous').
     """
     try:
         if not transcript_buffer:
-            return "No transcript file provided."
+            return f"No {quarter_label.lower()} transcript file provided."
 
-        logger.info(f"🟡 QUAL (Standalone) - Starting analysis for {company_name}...")
+        logger.info(f"🟡 QUAL (Standalone) - Starting {quarter_label} analysis for {company_name}...")
         
         # 1. Extract Text (Reusing existing helper)
         text = _extract_text_from_pdf_buffer(transcript_buffer)
@@ -524,9 +525,30 @@ def run_earnings_analysis_standalone(company_name, transcript_buffer, config):
         # Note: _analyze_positives_and_concerns handles the chunking/map-reduce logic internally
         result = _analyze_positives_and_concerns(text, config)
         
-        logger.info(f"🟡 QUAL (Standalone) - Analysis complete for {company_name}.")
+        logger.info(f"🟡 QUAL (Standalone) - {quarter_label} Analysis complete for {company_name}.")
         return result
 
     except Exception as e:
         logger.error(f"❌ QUAL (Standalone) - Failed: {e}")
         return f"Analysis failed: {str(e)}"
+    
+def run_comparison_standalone(latest_analysis_text: str, previous_analysis_text: str, config: dict) -> str:
+    """
+    Standalone runner for the 'Strategic Shift Analyzer'.
+    Compares two existing text summaries.
+    """
+    try:
+        if not latest_analysis_text or not previous_analysis_text:
+            return "Insufficient data: Both latest and previous quarter analyses are required for comparison."
+
+        logger.info("🟡 QUAL (Standalone) - Starting QoQ Comparison...")
+        
+        # Reuse the existing internal helper
+        result = _compare_transcripts(latest_analysis_text, previous_analysis_text, config)
+        
+        logger.info("🟡 QUAL (Standalone) - Comparison complete.")
+        return result
+
+    except Exception as e:
+        logger.error(f"❌ QUAL (Standalone) - Comparison Failed: {e}")
+        return f"Comparison analysis failed: {str(e)}"
