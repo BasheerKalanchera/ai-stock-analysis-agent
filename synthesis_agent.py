@@ -1,32 +1,69 @@
 import google.generativeai as genai
 import logging
 import time
+import random
+import re
 from google.api_core import exceptions as google_exceptions
 
 # --- CUSTOM LOGGER SETUP ---
 logger = logging.getLogger('synthesis_agent')
 logger.setLevel(logging.INFO)
-handler = logging.StreamHandler()
-formatter = logging.Formatter('%(asctime)s - 🔵 SYNTH - %(message)s')
-handler.setFormatter(formatter)
 if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - 🔵 SYNTH - %(message)s')
+    handler.setFormatter(formatter)
     logger.addHandler(handler)
 logger.propagate = False
 # --- END CUSTOM LOGGER SETUP ---
 
+def generate_with_retry(model, prompt, max_retries=3, base_delay=30):
+    """
+    Helper to retry Gemini generation on rate limit errors.
+    Defaults to a 30s wait, but prioritizes the actual wait time requested by the API.
+    """
+    for attempt in range(max_retries):
+        try:
+            return model.generate_content(prompt)
+        except (google_exceptions.ResourceExhausted, google_exceptions.TooManyRequests) as e:
+            retry_seconds = base_delay 
+            # Try to extract specific wait time from the error message
+            try:
+                match = re.search(r'retry_delay.*seconds:\s*(\d+)', str(e), re.DOTALL | re.IGNORECASE)
+                if match:
+                    retry_seconds = int(match.group(1)) + 5 # Add a small buffer
+            except:
+                pass
+
+            # If no specific time found, add jitter to base delay
+            if retry_seconds == base_delay:
+                retry_seconds = base_delay + random.uniform(1, 5)
+
+            logger.warning(f"Generation (Attempt {attempt + 1}/{max_retries}) encountered rate limit - retry after {retry_seconds:.1f} seconds.")
+            time.sleep(retry_seconds)
+            
+        except Exception as e:
+            # Handle generic 429s that might not match the specific Google exception types
+            if "429" in str(e):
+                retry_seconds = base_delay + random.uniform(1, 5)
+                logger.warning(f"Generation (Attempt {attempt + 1}/{max_retries}) encountered generic 429 - retry after {retry_seconds:.1f} seconds.")
+                time.sleep(retry_seconds)
+            else:
+                raise e
+                
+    raise Exception(f"Max retries ({max_retries}) exceeded. The API is too busy.")
 
 def generate_investment_summary(
     ticker: str, 
     quantitative_analysis: str, 
     qualitative_analysis: dict, 
     valuation_analysis: dict,
-    risk_analysis: str,      # <--- NEW PARAMETER
-    strategy_analysis: str,  # <--- NEW PARAMETER
+    risk_analysis: str,      
+    strategy_analysis: str,  
     agent_config: dict
 ) -> str:
     """
     Generates a final, comprehensive investment summary using the Gemini model.
-    Now includes Risk and Strategy agent outputs.
+    Now includes Risk and Strategy agent outputs and smart retry logic.
     """
     api_key = agent_config.get("GOOGLE_API_KEY")
     model_name = agent_config.get("HEAVY_MODEL_NAME", "gemini-1.5-flash") 
@@ -57,7 +94,7 @@ def generate_investment_summary(
     else:
         val_content = "Valuation analysis was not performed."
 
-    # --- 4. Prepare Risk & Strategy Summaries (NEW) ---
+    # --- 4. Prepare Risk & Strategy Summaries ---
     risk_text = risk_analysis if risk_analysis else "Risk analysis not performed."
     strategy_text = strategy_analysis if strategy_analysis else "Strategy analysis not performed."
 
@@ -138,35 +175,18 @@ def generate_investment_summary(
     """
 
     logger.info(f"Generating final investment summary for {ticker}...")
+    
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(model_name)
         
-        # --- RETRY LOGIC ---
-        max_retries = 3
-        base_delay_seconds = 65 
-
-        for attempt in range(max_retries):
-            try:
-                logger.info(f"Calling Gemini for synthesis of {ticker} (Attempt {attempt + 1})")
-                response = model.generate_content(prompt)
-                logger.info(f"Finished final analysis for {ticker}.")
-                return response.text
-            
-            except (google_exceptions.ResourceExhausted, google_exceptions.TooManyRequests) as e:
-                logger.warning(f"Rate limit hit for '{ticker}' synthesis: {e}. Waiting {base_delay_seconds}s to retry...")
-                if attempt < max_retries - 1:
-                    time.sleep(base_delay_seconds)
-                else:
-                    return f"Error: Rate limit exceeded during synthesis. {str(e)}"
-            
-            except Exception as e:
-                logger.error(f"Error during synthesis: {e}")
-                return f"Error during synthesis: {e}"
+        # Use the smart retry helper
+        response = generate_with_retry(model, prompt)
         
-        return f"Error: Synthesis failed after {max_retries} attempts."
+        logger.info(f"Finished final analysis for {ticker}.")
+        return response.text
 
     except Exception as e:
-        error_msg = f"Setup error during synthesis: {e}"
+        error_msg = f"Synthesis failed for {ticker}: {str(e)}"
         logger.error(error_msg)
         return error_msg

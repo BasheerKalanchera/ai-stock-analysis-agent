@@ -5,7 +5,7 @@ from screener_handler import ScreenerHandler
 # Load environment variables (for credentials)
 load_dotenv()
 
-target_url = "https://www.screener.in/market/IN02/" 
+target_url = "https://www.screener.in/market/IN06/" 
 
 def run_test():
     print(f"🚀 Starting Test on: {target_url}\n")
