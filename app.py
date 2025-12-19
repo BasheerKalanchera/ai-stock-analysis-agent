@@ -8,12 +8,13 @@ import pandas as pd
 import zipfile
 import json 
 
+
 # --- Import Graphs and State ---
 import graphs
 from state import StockAnalysisState
 
 # --- Page Configuration ---
-st.set_page_config(page_title="AI Stock Analysis Crew", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="Stock Research Workbench", page_icon="🤖", layout="wide")
 load_dotenv()
 
 # --- Configuration & Secret Handling ---
@@ -69,7 +70,23 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
     final_state_result = {}
     
     # --- MODE SELECTION LOGIC ---
-    if workflow_mode == "Risk Analysis Only":
+    if workflow_mode == "Quantitative Deep-Dive":
+        target_graph = graphs.quant_only_graph
+        placeholders = {
+            "screener_for_quant": status_container.empty(),
+            "isolated_quant": status_container.empty(),
+        }
+        placeholders["screener_for_quant"].markdown("⏳ **Downloading Excel Data...**")
+
+    elif workflow_mode == "Valuation & Governance Deep-Dive":
+        target_graph = graphs.valuation_only_graph
+        placeholders = {
+            "screener_for_valuation": status_container.empty(),
+            "isolated_valuation": status_container.empty(),
+        }
+        placeholders["screener_for_valuation"].markdown("⏳ **Identifying Peers & Market Data...**")
+
+    elif workflow_mode == "Risk Analysis Only":
         target_graph = graphs.risk_only_graph
         placeholders = {
             "screener_for_risk": status_container.empty(),
@@ -140,6 +157,24 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                     placeholders["isolated_risk"].markdown("⏳ **Generating Risk Profile...**")
                 elif node_name == "isolated_risk":
                     placeholders["isolated_risk"].markdown("✅ **Risk Analysis Complete**")
+
+            elif workflow_mode == "Valuation & Governance Deep-Dive":
+                if node_name == "screener_for_valuation":
+                    c_name = node_output.get("company_name", ticker_symbol)
+                    progress_text_container.write(f"Fetching Peers for {ticker_symbol} ({c_name})...")
+                    placeholders["screener_for_valuation"].markdown("✅ **Peer Data Retrieved**")
+                    placeholders["isolated_valuation"].markdown("⏳ **Running Valuation Models...**")
+                elif node_name == "isolated_valuation":
+                    placeholders["isolated_valuation"].markdown("✅ **Valuation Complete**")
+
+            elif workflow_mode == "Quantitative Deep-Dive": # <--- YOUR NEW INSERTION
+                if node_name == "screener_for_quant":
+                    c_name = node_output.get("company_name", ticker_symbol)
+                    progress_text_container.write(f"Fetching Data for {ticker_symbol} ({c_name})...")
+                    placeholders["screener_for_quant"].markdown("✅ **Excel Data Downloaded**")
+                    placeholders["isolated_quant"].markdown("⏳ **Analyzing Financials & Generating Charts...**")
+                elif node_name == "isolated_quant":
+                    placeholders["isolated_quant"].markdown("✅ **Quantitative Analysis Complete**")
 
             elif workflow_mode == "SEBI Violations Check (MVP)":
                  if node_name == "screener_metadata":
@@ -215,8 +250,8 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
     return final_state_result
 
 # --- Streamlit UI ---
-st.title("🤖 AI Stock Analysis Crew (Enhanced)")
-st.header("Automated Investment Analysis Workflow", divider="rainbow")
+st.title("🤖 AI Based Stock Research Workbench")
+st.header("Please select the type of research from the side bar", divider="rainbow")
 
 if 'analysis_results' not in st.session_state:
     st.session_state.analysis_results = {}
@@ -228,6 +263,8 @@ workflow_mode = st.sidebar.selectbox(
     "Select Workflow",
     [
         "Full Workflow (PDF Report)",
+        "Quantitative Deep-Dive",
+        "Valuation & Governance Deep-Dive",
         "Risk Analysis Only",
         "SEBI Violations Check (MVP)",
         "Latest Earnings Decoder",
@@ -343,7 +380,56 @@ if st.session_state.analysis_results:
 
     # --- DISPLAY LOGIC BY MODE ---
     
-    if run_mode == "SEBI Violations Check (MVP)":
+    if run_mode == "Quantitative Deep-Dive":
+        st.info("📊 **Quantitative Deep-Dive**: Sequential analysis of financial trends and performance charts.")
+        
+        # Get the structured results from the agent
+        structured_data = final_state.get('quant_results_structured', [])
+        
+        if structured_data:
+            for item in structured_data:
+                content = item.get('content')
+                item_type = item.get('type')
+                
+                if item_type == 'chart':
+                    if content is not None:
+                        # Update: use width="stretch" instead of use_container_width=True
+                        st.image(content, width="stretch")
+                    else:
+                        st.warning("A chart was expected here but the data was empty.")
+                        
+                elif item_type == 'table':
+                    # Update: use width="stretch" instead of use_container_width=True
+                    st.dataframe(content, width="stretch")
+                    
+                elif item_type == 'text':
+                    # This ensures the explanation appears directly below the chart
+                    st.markdown(content)
+                    
+        else:
+            st.warning("No structured quantitative data found for this ticker.")
+            
+        with st.expander("View Execution Logs"):
+             if final_state.get('log_file_content'): 
+                 st.code(final_state['log_file_content'], language='markdown')
+
+    elif run_mode == "Valuation & Governance Deep-Dive":
+        st.info("⚖️ **Valuation & Governance**: Relative valuation metrics and peer group comparison.")
+        
+        val_res = final_state.get('valuation_results', {})
+        # Valuation agent usually returns a dict with 'content' and potentially 'peer_table'
+        content = val_res.get('content', "No text analysis provided.") if isinstance(val_res, dict) else val_res
+        
+        st.markdown(content)
+        
+        if isinstance(val_res, dict) and 'peer_comparison_table' in val_res:
+             st.subheader("📊 Peer Comparison Matrix")
+             st.dataframe(val_res['peer_comparison_table'], width="stretch")
+             
+        with st.expander("View Execution Logs"):
+             if final_state.get('log_file_content'): st.code(final_state['log_file_content'], language='markdown')
+
+    elif run_mode == "SEBI Violations Check (MVP)":
         st.info("SEBI Check Mode: Scanned for official regulatory orders/penalties using live search.")
         st.markdown("### 🏛️ SEBI Regulatory Status")
         qual_res = final_state.get('qualitative_results', {})

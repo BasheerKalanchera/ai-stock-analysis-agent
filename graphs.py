@@ -92,3 +92,29 @@ scuttlebutt_workflow_def.add_edge("risk_analysis", "scuttlebutt_analysis")
 scuttlebutt_workflow_def.add_edge("scuttlebutt_analysis", END)
 
 scuttlebutt_graph = scuttlebutt_workflow_def.compile()
+
+# ==============================================================================
+# 7. QUANTITATIVE DEEP-DIVE GRAPH
+# ==============================================================================
+quant_workflow_def = StateGraph(StockAnalysisState)
+quant_workflow_def.add_node("screener_for_quant", nodes.screener_for_quant_node)
+quant_workflow_def.add_node("isolated_quant", nodes.isolated_quantitative_node)
+
+quant_workflow_def.set_entry_point("screener_for_quant")
+quant_workflow_def.add_edge("screener_for_quant", "isolated_quant")
+quant_workflow_def.add_edge("isolated_quant", END)
+
+quant_only_graph = quant_workflow_def.compile()
+
+# ==============================================================================
+# 8. VALUATION DEEP-DIVE GRAPH
+# ==============================================================================
+val_workflow_def = StateGraph(StockAnalysisState)
+val_workflow_def.add_node("screener_for_valuation", nodes.screener_for_valuation_node)
+val_workflow_def.add_node("isolated_valuation", nodes.isolated_valuation_node)
+
+val_workflow_def.set_entry_point("screener_for_valuation")
+val_workflow_def.add_edge("screener_for_valuation", "isolated_valuation")
+val_workflow_def.add_edge("isolated_valuation", END)
+
+valuation_only_graph = val_workflow_def.compile()

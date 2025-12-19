@@ -444,3 +444,120 @@ def scuttlebutt_analysis_node(state: StockAnalysisState):
     current_qual['scuttlebutt'] = result_text
 
     return {"qualitative_results": current_qual, "log_file_content": log_content_accumulator}
+
+# ==============================================================================
+# 5. QUANTITATIVE DEEP-DIVE NODES
+# ==============================================================================
+
+def screener_for_quant_node(state: StockAnalysisState):
+    """
+    Step 1: Streamlined Fetch. 
+    Downloads ONLY the Excel data to maximize speed for quantitative analysis.
+    """
+    ticker = state['ticker']
+    is_consolidated = state['is_consolidated']
+    config = state['agent_config']
+    log_content_accumulator = state.get('log_file_content', "")
+
+    # Call with minimal requirements: only need_excel is True
+    company_name, file_data, peer_data = download_financial_data(
+        ticker, config, is_consolidated,
+        need_excel=True, 
+        need_transcripts=False, 
+        need_ppt=False, 
+        need_peers=True, # Often needed for valuation/quant ratios
+        need_credit_report=False 
+    )
+    
+    log_entry = (f"## QUANT DEEP-DIVE: FETCH for {company_name or ticker}\n"
+                 f"**Excel Data**: {'Downloaded' if file_data.get('excel') else 'Failed'}\n---\n")
+    
+    return {
+        "company_name": company_name, 
+        "file_data": file_data, 
+        "peer_data": peer_data,
+        "log_file_content": log_content_accumulator + log_entry
+    }
+
+def isolated_quantitative_node(state: StockAnalysisState):
+    """
+    Step 2: Isolated Analysis.
+    Processes the Excel data specifically for visual rendering in the UI.
+    """
+    excel_data = state['file_data'].get('excel')
+    log_content_accumulator = state['log_file_content']
+    config = state['agent_config']
+    
+    if not excel_data:
+        text_results = "Quantitative analysis skipped: Excel data not found."
+        structured_results = [{"type": "text", "content": text_results}]
+    else:
+        # Requesting structured data (DataFrames/Charts) from the agent
+        structured_results = execute_with_fallback(
+            analyze_financials, log_content_accumulator, "Quantitative (Isolated)",
+            excel_data, state['ticker'], config
+        )
+        
+        if isinstance(structured_results, str):
+             text_results = structured_results
+             structured_results = [{"type": "text", "content": text_results}]
+        else:
+             text_results = "\n".join([item['content'] for item in structured_results if item['type'] == 'text'])
+
+    log_entry = f"## QUANT DEEP-DIVE: ANALYSIS COMPLETE\n\n{text_results}\n\n---\n\n"
+    
+    return {
+        "quant_results_structured": structured_results, 
+        "quant_text_for_synthesis": text_results, 
+        "log_file_content": log_content_accumulator + log_entry
+    }
+
+# ==============================================================================
+# 6. VALUATION DEEP-DIVE NODES
+# ==============================================================================
+
+def screener_for_valuation_node(state: StockAnalysisState):
+    """Downloads only the Metadata and Peer Data needed for valuation analysis."""
+    ticker = state['ticker']
+    config = state['agent_config']
+    log_content_accumulator = state.get('log_file_content', "")
+
+    # Call with minimal requirements: only need_peers is True
+    company_name, _, peer_data = download_financial_data(
+        ticker, config, 
+        need_excel=False, 
+        need_transcripts=False, 
+        need_ppt=False, 
+        need_peers=True, # Often needed for valuation/quant ratios
+        need_credit_report=False 
+    )
+    
+    log_entry = (f"## VALUATION DEEP-DIVE: FETCH for {company_name or ticker}\n"
+                 f"**Peer Data**: {'Downloaded' if not peer_data.empty else 'Failed/Empty'}\n---\n")
+    
+    return {
+        "company_name": company_name, 
+        "peer_data": peer_data, 
+        "log_file_content": log_content_accumulator + log_entry
+    }
+
+def isolated_valuation_node(state: StockAnalysisState):
+    """Executes the standalone valuation analysis."""
+    ticker = state['ticker']
+    company_name = state.get('company_name') 
+    peer_data = state.get('peer_data')
+    config = state['agent_config']
+    log_content_accumulator = state['log_file_content']
+    
+    results = execute_with_fallback(
+        run_valuation_analysis, log_content_accumulator, "Valuation (Isolated)",
+        ticker, company_name, peer_data, config
+    )
+    
+    content = results.get("content", "No valuation analysis generated.") if isinstance(results, dict) else str(results)
+    log_entry = f"## VALUATION DEEP-DIVE: ANALYSIS COMPLETE\n\n{content}\n\n---\n\n"
+    
+    return {
+        "valuation_results": results if isinstance(results, dict) else {}, 
+        "log_file_content": log_content_accumulator + log_entry
+    }
