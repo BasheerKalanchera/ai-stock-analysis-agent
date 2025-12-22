@@ -78,6 +78,14 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
         }
         placeholders["screener_for_quant"].markdown("⏳ **Downloading Excel Data...**")
 
+    elif workflow_mode == "Strategy Deep Dive":
+        target_graph = graphs.strategy_only_graph
+        placeholders = {
+            "screener_for_strategy": status_container.empty(),
+            "isolated_strategy": status_container.empty(),
+        }
+        placeholders["screener_for_strategy"].markdown("⏳ **Searching for Investor Presentation...**")
+
     elif workflow_mode == "Valuation & Governance Deep-Dive":
         target_graph = graphs.valuation_only_graph
         placeholders = {
@@ -157,6 +165,23 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                     placeholders["isolated_risk"].markdown("⏳ **Generating Risk Profile...**")
                 elif node_name == "isolated_risk":
                     placeholders["isolated_risk"].markdown("✅ **Risk Analysis Complete**")
+
+            elif workflow_mode == "Strategy Deep Dive":
+                if node_name == "screener_for_strategy":
+                    c_name = node_output.get("company_name", ticker_symbol)
+                    ppt_found = node_output.get("file_data", {}).get("investor_presentation")
+                    
+                    progress_text_container.write(f"Analyzing Strategy for {ticker_symbol} ({c_name})...")
+                    
+                    if ppt_found:
+                        placeholders["screener_for_strategy"].markdown("✅ **Presentation Downloaded**")
+                        placeholders["isolated_strategy"].markdown("⏳ **Extracting Alpha & Strategic Shifts...**")
+                    else:
+                        placeholders["screener_for_strategy"].markdown("❌ **Presentation Not Found**")
+                        placeholders["isolated_strategy"].markdown("⚠️ **Aborting Strategy Analysis**")
+                        
+                elif node_name == "isolated_strategy":
+                    placeholders["isolated_strategy"].markdown("✅ **Strategy Analysis Complete**")
 
             elif workflow_mode == "Valuation & Governance Deep-Dive":
                 if node_name == "screener_for_valuation":
@@ -265,6 +290,7 @@ workflow_mode = st.sidebar.selectbox(
         "Full Workflow (PDF Report)",
         "Quantitative Deep-Dive",
         "Valuation & Governance Deep-Dive",
+        "Strategy Deep Dive",
         "Risk Analysis Only",
         "SEBI Violations Check (MVP)",
         "Latest Earnings Decoder",
@@ -413,6 +439,20 @@ if st.session_state.analysis_results:
              if final_state.get('log_file_content'): 
                  st.code(final_state['log_file_content'], language='markdown')
 
+    elif run_mode == "Strategy Deep Dive":
+        st.info("🎯 **Strategy Deep Dive**: Analyzes the latest Investor Presentation to identify growth pillars and strategic shifts.")
+        
+        strat_res = final_state.get('strategy_results', "No analysis available.")
+        
+        # Check if the agent returned the specific error regarding missing PPT
+        if "No Investor Presentation found" in strat_res:
+            st.error("Could not find an Investor Presentation (PPT) for this company. Strategy analysis requires this document.")
+        else:
+            st.markdown(strat_res)
+            
+        with st.expander("View Execution Logs"):
+             if final_state.get('log_file_content'): st.code(final_state['log_file_content'], language='markdown')
+             
     elif run_mode == "Valuation & Governance Deep-Dive":
         st.info("⚖️ **Valuation & Governance**: Relative valuation metrics and peer group comparison.")
         

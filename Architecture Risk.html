@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Strategic AI Architecture - Risk Intelligence Pipeline</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #cbd5e1;
+            color: #0f172a;
+            min-height: 100vh;
+            background-image: radial-gradient(#94a3b8 1.5px, transparent 1.5px);
+            background-size: 32px 32px;
+        }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+        .card-panel {
+            background: #ffffff;
+            border: 1px solid #e2e8f0;
+            box-shadow: 0 15px 25px -5px rgba(0, 0, 0, 0.1);
+        }
+        .infra-feature {
+            background: rgba(255, 255, 255, 0.7);
+            border: 2px dashed #94a3b8;
+            backdrop-filter: blur(4px);
+        }
+        .flow-line {
+            height: 3px;
+            background: #334155;
+            position: relative;
+            flex-grow: 1;
+        }
+        .flow-line::after {
+            content: '▶';
+            position: absolute;
+            right: -6px;
+            top: -10px;
+            font-size: 16px;
+            color: #1e293b;
+        }
+        .text-header { font-size: 16px; font-weight: 800; text-transform: uppercase; }
+        .text-sub { font-size: 12px; font-weight: 700; font-style: italic; }
+        .text-detail { font-size: 13px; font-weight: 600; }
+        .text-description { font-size: 12px; line-height: 1.4; font-weight: 500; }
+        
+        .step-pill {
+            background: #1e293b;
+            color: white;
+            padding: 2px 12px;
+            border-radius: 99px;
+            font-size: 10px;
+            font-weight: 900;
+            margin-bottom: 8px;
+            display: inline-block;
+        }
+    </style>
+</head>
+<body class="p-6 lg:p-12">
+    <div class="max-w-[1600px] mx-auto">
+        
+        <header class="mb-12 border-b-2 border-slate-400 pb-8">
+            <div>
+                <h1 class="text-4xl font-extrabold tracking-tight text-slate-900">
+                    Stock Research Workbench - <span class="text-red-700 italic">Risk Analysis Workflow</span>
+                </h1>
+                
+            </div>
+        </header>
+
+        <div class="flex flex-col gap-12">
+            
+            <div class="grid grid-cols-12 items-center gap-4">
+                
+                <div class="col-span-2">
+                    <div class="card-panel p-8 rounded-2xl border-slate-300 min-h-[220px] flex flex-col justify-center relative">
+                        <div class="absolute top-0 left-0 w-full bg-slate-800 text-white text-center py-1 rounded-t-2xl text-[9px] font-black uppercase tracking-widest">
+                            External Data
+                        </div>
+
+                        <div class="step-pill mt-4">DATA SOURCE</div>
+                        <div class="flex items-center gap-3 mb-4">
+                            <div class="bg-slate-800 p-2 rounded-lg text-white">
+                                <i data-lucide="database" class="w-6 h-6"></i>
+                            </div>
+                            <div>
+                                <div class="text-header">Screener.in</div>
+                                <div class="text-sub text-red-700">Financial Core</div>
+                            </div>
+                        </div>
+                        <ul class="text-detail text-slate-600 space-y-2">
+                            <li class="flex items-center gap-2"><span class="w-1.5 h-1.5 bg-red-600 rounded-full"></span> Credit Rating Report</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <div class="col-span-1 flex flex-col items-center">
+                    <div class="flow-line w-full"></div>
+                    <span class="text-[10px] font-bold mt-2 text-slate-500 uppercase">Fetch</span>
+                </div>
+
+                <div class="col-span-6 bg-slate-400/20 border-2 border-slate-400/40 p-8 rounded-[3rem] relative">
+                    <div class="absolute -top-4 left-1/2 -translate-x-1/2 bg-purple-800 text-white px-6 py-1 rounded-full text-[11px] font-black tracking-widest uppercase">
+                        Risk & Control Pipeline (LangGraph)
+                    </div>
+
+                    <div class="flex items-start gap-6 mt-4">
+                        <div class="flex-1 card-panel p-6 rounded-xl border-blue-200">
+                            <div class="step-pill">STEP 2</div>
+                            <div class="flex items-center gap-3 mb-3">
+                                <i data-lucide="download-cloud" class="w-5 h-5 text-blue-600"></i>
+                                <div class="text-[14px] font-bold uppercase">Screener_Download</div>
+                            </div>
+                            <p class="text-description text-slate-600 italic">
+                                Orchestrates screener.in login and retrieves credit report into memory.
+                            </p>
+                        </div>
+
+                        <div class="pt-12 flex flex-col items-center">
+                            <i data-lucide="arrow-right-left" class="text-slate-400 w-5 h-5"></i>
+                            <span class="text-[9px] font-black text-slate-500 mt-1 uppercase">State</span>
+                        </div>
+
+                        <div class="flex-1 card-panel p-6 rounded-xl border-red-200">
+                            <div class="step-pill">STEP 3</div>
+                            <div class="flex items-center gap-3 mb-3">
+                                <i data-lucide="shield-alert" class="w-5 h-5 text-red-600"></i>
+                                <div class="text-[14px] font-bold uppercase">Risk Analyst Agent</div>
+                            </div>
+                            <p class="text-description text-slate-600 italic">
+                                Parses report text from state to synthesize structural risk profiles and liquidity shields.
+                            </p>
+                        </div>
+                    </div>
+
+                    <div class="mt-8 pt-6 border-t border-slate-300 grid grid-cols-2 gap-4">
+                        <div class="infra-feature p-4 rounded-xl flex items-center gap-4">
+                            <div class="bg-emerald-100 p-2 rounded-lg text-emerald-700">
+                                <i data-lucide="shield-check" class="w-5 h-5"></i>
+                            </div>
+                            <div>
+                                <div class="text-[11px] font-black uppercase text-emerald-800 tracking-tighter">Stateless RAM Buffer</div>
+                                <div class="text-[10px] text-slate-500 font-mono">io.BytesIO Virtualization</div>
+                            </div>
+                        </div>
+                        <div class="infra-feature p-4 rounded-xl flex items-center gap-4">
+                            <div class="bg-orange-100 p-2 rounded-lg text-orange-700">
+                                <i data-lucide="zap" class="w-5 h-5"></i>
+                            </div>
+                            <div>
+                                <div class="text-[11px] font-black uppercase text-orange-800 tracking-tighter">Resilience Governor</div>
+                                <div class="text-[10px] text-slate-500 font-mono">Model Fallback & Retries</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-span-1 flex flex-col items-center">
+                    <div class="flow-line w-full"></div>
+                    <span class="text-[10px] font-bold mt-2 text-slate-500 uppercase">Render</span>
+                </div>
+
+                <div class="col-span-2">
+                    <div class="card-panel p-8 rounded-2xl border-blue-400 ring-4 ring-blue-600/5 min-h-[220px] flex flex-col justify-center relative">
+                        <div class="absolute top-0 left-0 w-full bg-blue-700 text-white text-center py-1 rounded-t-2xl text-[9px] font-black uppercase tracking-widest">
+                            Interface Layer
+                        </div>
+                        
+                        <div class="step-pill mt-4">STEP 1 & 4</div>
+                        <div class="flex items-center gap-3 mb-4">
+                            <div class="bg-blue-700 p-2 rounded-lg text-white">
+                                <i data-lucide="monitor" class="w-6 h-6"></i>
+                            </div>
+                            <div>
+                                <div class="text-header">Streamlit UI</div>
+                                <div class="text-sub text-blue-700 uppercase">Workbench</div>
+                            </div>
+                        </div>
+                        <ul class="text-detail text-slate-600 space-y-2">
+                            <li class="flex items-center gap-2"><span class="w-1.5 h-1.5 bg-blue-700 rounded-full"></span> User Inputs</li>
+                            <li class="flex items-center gap-2"><span class="w-1.5 h-1.5 bg-blue-700 rounded-full"></span> Risk Forensics</li>
+                        </ul>
+                    </div>
+                </div>
+
+            </div>
+
+            <footer class="grid grid-cols-1 md:grid-cols-3 gap-8 border-t-2 border-slate-400 pt-10 pb-12 text-slate-700">
+                <div class="bg-white/40 p-6 rounded-2xl border border-white/60">
+                    <h4 class="text-[12px] font-black uppercase tracking-widest mb-3 flex items-center gap-2">
+                        <i data-lucide="mouse-pointer-2" class="w-4 h-4"></i> Trigger Phase
+                    </h4>
+                    <p class="text-sm italic leading-relaxed">
+                        The user initiates a query via the <strong>Streamlit UI</strong>. This interaction triggers the LangGraph workflow, passing control to the downloader.
+                    </p>
+                </div>
+                <div class="bg-white/40 p-6 rounded-2xl border border-white/60">
+                    <h4 class="text-[12px] font-black uppercase tracking-widest mb-3 flex items-center gap-2">
+                        <i data-lucide="refresh-cw" class="w-4 h-4"></i> Forensic Handoff
+                    </h4>
+                    <p class="text-sm italic leading-relaxed">
+                        Data is kept in <strong>RAM (BytesIO)</strong>. The Screener Agent updates the shared State with the credit report, which the Risk Agent immediately parses.
+                    </p>
+                </div>
+                <div class="bg-white/40 p-6 rounded-2xl border border-white/60">
+                    <h4 class="text-[12px] font-black uppercase tracking-widest mb-3 flex items-center gap-2">
+                        <i data-lucide="layout-dashboard" class="w-4 h-4"></i> Risk Profile Return
+                    </h4>
+                    <p class="text-sm italic leading-relaxed">
+                        Once text analysis is complete, control returns to the UI to render the <strong>Risk Profile</strong>, including structural antagonists and solvency audits.
+                    </p>
+                </div>
+            </footer>
+        </div>
+
+        <div class="text-center text-[10px] text-slate-500 font-mono uppercase tracking-[0.8em] pb-8 font-bold">
+            Proprietary Architecture &copy; 2025 Strategic AI Consulting | Zero-Persistence Framework
+        </div>
+
+    </div>
+
+    <script>
+        lucide.createIcons();
+    </script>
+</body>
+</html>

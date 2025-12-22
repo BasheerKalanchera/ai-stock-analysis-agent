@@ -561,3 +561,59 @@ def isolated_valuation_node(state: StockAnalysisState):
         "valuation_results": results if isinstance(results, dict) else {}, 
         "log_file_content": log_content_accumulator + log_entry
     }
+
+# ==============================================================================
+# 9. STRATEGY DEEP-DIVE NODES (NEW)
+# ==============================================================================
+
+def screener_for_strategy_node(state: StockAnalysisState) -> Dict[str, Any]:
+    """
+    Downloads ONLY the Investor Presentation (PPT).
+    Sets all other download flags to False to minimize execution time.
+    """
+    ticker = state['ticker']
+    config = state['agent_config']
+    log_content_accumulator = state.get('log_file_content', "")
+
+    # Call with minimal requirements: only need_ppt is True
+    company_name, file_data, _ = download_financial_data(
+        ticker, config, 
+        need_excel=False, 
+        need_transcripts=False, 
+        need_ppt=True,          # <--- ONLY PPT
+        need_peers=False, 
+        need_credit_report=False 
+    )
+    
+    status = "Downloaded" if file_data.get('investor_presentation') else "Not Found"
+    log_entry = (f"## STRATEGY DEEP-DIVE: FETCH for {company_name or ticker}\n"
+                 f"**Investor Presentation**: {status}\n---\n")
+    
+    return {
+        "company_name": company_name, 
+        "file_data": file_data, 
+        "log_file_content": log_content_accumulator + log_entry
+    }
+
+def isolated_strategy_node(state: StockAnalysisState) -> Dict[str, Any]:
+    """
+    Executes the standalone strategy analysis using the downloaded PPT.
+    """
+    log_content_accumulator = state['log_file_content']
+    config = state['agent_config']
+    
+    def strategy_wrapper(f_data, cfg):
+        model_to_use = cfg.get("LITE_MODEL_NAME") 
+        return strategy_analyst_agent(f_data, cfg["GOOGLE_API_KEY"], model_to_use)
+
+    result_text = execute_with_fallback(
+        strategy_wrapper, log_content_accumulator, "Strategy (Isolated)",
+        state['file_data'], config
+    )
+
+    log_entry = f"## STRATEGY DEEP-DIVE: ANALYSIS COMPLETE\n\n{result_text}\n\n---\n\n"
+    
+    return {
+        "strategy_results": result_text, 
+        "log_file_content": log_content_accumulator + log_entry
+    }

@@ -118,3 +118,16 @@ val_workflow_def.add_edge("screener_for_valuation", "isolated_valuation")
 val_workflow_def.add_edge("isolated_valuation", END)
 
 valuation_only_graph = val_workflow_def.compile()
+
+# ==============================================================================
+# 9. STRATEGY DEEP-DIVE GRAPH
+# ==============================================================================
+strat_workflow_def = StateGraph(StockAnalysisState)
+strat_workflow_def.add_node("screener_for_strategy", nodes.screener_for_strategy_node)
+strat_workflow_def.add_node("isolated_strategy", nodes.isolated_strategy_node)
+
+strat_workflow_def.set_entry_point("screener_for_strategy")
+strat_workflow_def.add_edge("screener_for_strategy", "isolated_strategy")
+strat_workflow_def.add_edge("isolated_strategy", END)
+
+strategy_only_graph = strat_workflow_def.compile()
