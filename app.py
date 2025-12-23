@@ -88,21 +88,7 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
         }
         placeholders["screener_for_qual"].markdown("⏳ **Fetching Transcripts, PPT & Credit Docs...**")
 
-        if node_name == "screener_for_qual":
-                    placeholders["screener_for_qual"].markdown("✅ **Documents Downloaded**")
-                    placeholders["strategy_prereq"].markdown("⏳ **Generating Strategy Context...**")
-                
-        elif node_name == "strategy_prereq":
-                    placeholders["strategy_prereq"].markdown("✅ **Strategy Context Ready**")
-                    placeholders["risk_prereq"].markdown("⏳ **Generating Risk Context...**")
-                    
-        elif node_name == "risk_prereq":
-                    placeholders["risk_prereq"].markdown("✅ **Risk Context Ready**")
-                    placeholders["isolated_qual"].markdown("⏳ **Running Deep-Dive Qualitative Analysis...**")
-                    
-        elif node_name == "isolated_qual":
-                    placeholders["isolated_qual"].markdown("✅ **Qualitative Deep-Dive Complete**")
-
+        
     elif workflow_mode == "Strategy Deep Dive":
         target_graph = graphs.strategy_only_graph
         placeholders = {
@@ -225,6 +211,22 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                     placeholders["isolated_quant"].markdown("⏳ **Analyzing Financials & Generating Charts...**")
                 elif node_name == "isolated_quant":
                     placeholders["isolated_quant"].markdown("✅ **Quantitative Analysis Complete**")
+
+            elif workflow_mode == "Qualitative Deep-Dive":
+                if node_name == "screener_for_qual":
+                    placeholders["screener_for_qual"].markdown("✅ **Documents Downloaded**")
+                    placeholders["strategy_prereq"].markdown("⏳ **Generating Strategy Context...**")
+                
+                elif node_name == "strategy_prereq":
+                    placeholders["strategy_prereq"].markdown("✅ **Strategy Context Ready**")
+                    placeholders["risk_prereq"].markdown("⏳ **Generating Risk Context...**")
+                    
+                elif node_name == "risk_prereq":
+                    placeholders["risk_prereq"].markdown("✅ **Risk Context Ready**")
+                    placeholders["isolated_qual"].markdown("⏳ **Running Deep-Dive Qualitative Analysis...**")
+                    
+                elif node_name == "isolated_qual":
+                    placeholders["isolated_qual"].markdown("✅ **Qualitative Deep-Dive Complete**")
 
             elif workflow_mode == "SEBI Violations Check (MVP)":
                  if node_name == "screener_metadata":
