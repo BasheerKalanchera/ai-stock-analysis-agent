@@ -110,15 +110,15 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
         }
         placeholders["screener_metadata"].markdown("⏳ **Identifying Company...**")
 
-    elif workflow_mode == "Latest Earnings Decoder":
+    elif workflow_mode == "Latest Concall Analysis":
         target_graph = graphs.earnings_graph
         placeholders = {
             "fetch_latest": status_container.empty(),
             "analyze_latest": status_container.empty()
         }
         placeholders["fetch_latest"].markdown("⏳ **Fetching Latest Transcript...**")
-    
-    elif workflow_mode == "Strategic Shift Analyzer (QoQ)":
+
+    elif workflow_mode == "QoQ Concall Analysis":
         target_graph = graphs.strategy_shift_graph
         placeholders = {
             "fetch_both": status_container.empty(),
@@ -210,7 +210,7 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                  elif node_name == "sebi_check":
                     placeholders["sebi_check"].markdown("✅ **Regulatory Check Complete**")
 
-            elif workflow_mode == "Latest Earnings Decoder":
+            elif workflow_mode == "Latest Concall Analysis":
                 if node_name == "fetch_latest":
                     c_name = node_output.get("company_name", ticker_symbol)
                     progress_text_container.write(f"Decoding Earnings for {ticker_symbol} ({c_name})...")
@@ -218,8 +218,8 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                     placeholders["analyze_latest"].markdown("⏳ **Decoding Management Speak...**")
                 elif node_name == "analyze_latest":
                     placeholders["analyze_latest"].markdown("✅ **Analysis Complete**")
-            
-            elif workflow_mode == "Strategic Shift Analyzer (QoQ)":
+
+            elif workflow_mode == "QoQ Concall Analysis":
                 if node_name == "fetch_both":
                     c_name = node_output.get("company_name", ticker_symbol)
                     progress_text_container.write(f"Analyzing Shift for {ticker_symbol} ({c_name})...")
@@ -293,8 +293,8 @@ workflow_mode = st.sidebar.selectbox(
         "Strategy Deep Dive",
         "Risk Analysis Only",
         "SEBI Violations Check (MVP)",
-        "Latest Earnings Decoder",
-        "Strategic Shift Analyzer (QoQ)",
+        "Latest Concall Analysis",
+        "QoQ Concall Analysis",
         "Scuttlebutt Research" 
     ]
 )
@@ -452,7 +452,7 @@ if st.session_state.analysis_results:
             
         with st.expander("View Execution Logs"):
              if final_state.get('log_file_content'): st.code(final_state['log_file_content'], language='markdown')
-             
+
     elif run_mode == "Valuation & Governance Deep-Dive":
         st.info("⚖️ **Valuation & Governance**: Relative valuation metrics and peer group comparison.")
         
@@ -487,7 +487,7 @@ if st.session_state.analysis_results:
         with st.expander("View Execution Logs"):
              if final_state.get('log_file_content'): st.code(final_state['log_file_content'], language='markdown')
 
-    elif run_mode == "Latest Earnings Decoder":
+    elif run_mode == "Latest Concall Analysis":
         st.info("Earnings Decoder Mode: Focused analysis of the most recent quarterly conference call.")
         
         qual_res = final_state.get('qualitative_results', {})
@@ -502,8 +502,8 @@ if st.session_state.analysis_results:
         with st.expander("View Execution Logs"):
              if final_state.get('log_file_content'): st.code(final_state['log_file_content'], language='markdown')
 
-    elif run_mode == "Strategic Shift Analyzer (QoQ)":
-        st.info("Strategic Shift Mode: Comparing the two most recent earnings calls to detect changes in tone, strategy, and outlook.")
+    elif run_mode == "QoQ Concall Analysis":
+        st.info("QoQ Concall Analysis: Comparing the two most recent earnings calls to detect changes in tone, strategy, and outlook.")
         
         qual_res = final_state.get('qualitative_results', {})
         comp_json_str = qual_res.get('qoq_comparison')
@@ -515,7 +515,7 @@ if st.session_state.analysis_results:
                 clean_json = comp_json_str.replace("```json", "").replace("```", "").strip()
                 comparison_data = json.loads(clean_json)
                 
-                st.subheader("📊 Strategic Shift Matrix")
+                st.subheader("📊 QoQ Concall Analysis")
                 
                 # Convert list of dicts to DataFrame for clean display
                 df_compare = pd.DataFrame(comparison_data)
