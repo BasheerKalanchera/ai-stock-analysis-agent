@@ -131,3 +131,30 @@ strat_workflow_def.add_edge("screener_for_strategy", "isolated_strategy")
 strat_workflow_def.add_edge("isolated_strategy", END)
 
 strategy_only_graph = strat_workflow_def.compile()
+
+# --- APPEND TO graphs.py ---
+
+# ==============================================================================
+# 10. QUALITATIVE DEEP-DIVE GRAPH (High Context)
+# ==============================================================================
+qual_workflow_def = StateGraph(StockAnalysisState)
+
+# 1. Fetch Data
+qual_workflow_def.add_node("screener_for_qual", nodes.screener_for_qual_node)
+
+# 2. Run Prerequisites (Strategy & Risk) to build context
+# We reuse the existing nodes from the full workflow as they work perfectly here
+qual_workflow_def.add_node("strategy_prereq", nodes.strategy_analysis_node)
+qual_workflow_def.add_node("risk_prereq", nodes.risk_analysis_node)
+
+# 3. Run Main Agent
+qual_workflow_def.add_node("isolated_qual", nodes.isolated_qualitative_node)
+
+# Define Flow
+qual_workflow_def.set_entry_point("screener_for_qual")
+qual_workflow_def.add_edge("screener_for_qual", "strategy_prereq")
+qual_workflow_def.add_edge("strategy_prereq", "risk_prereq")
+qual_workflow_def.add_edge("risk_prereq", "isolated_qual")
+qual_workflow_def.add_edge("isolated_qual", END)
+
+qualitative_only_graph = qual_workflow_def.compile()

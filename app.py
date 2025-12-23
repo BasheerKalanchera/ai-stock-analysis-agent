@@ -78,6 +78,16 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
         }
         placeholders["screener_for_quant"].markdown("⏳ **Downloading Excel Data...**")
 
+    elif workflow_mode == "Qualitative Deep-Dive":
+        target_graph = graphs.qualitative_only_graph
+        placeholders = {
+            "screener_for_qual": status_container.empty(),
+            "strategy_prereq": status_container.empty(),
+            "risk_prereq": status_container.empty(),
+            "isolated_qual": status_container.empty(),
+        }
+        placeholders["screener_for_qual"].markdown("⏳ **Fetching Transcripts, PPT & Credit Docs...**")
+
     elif workflow_mode == "Strategy Deep Dive":
         target_graph = graphs.strategy_only_graph
         placeholders = {
@@ -289,6 +299,7 @@ workflow_mode = st.sidebar.selectbox(
     [
         "Full Workflow (PDF Report)",
         "Quantitative Deep-Dive",
+        "Qualitative Deep-Dive",    
         "Valuation & Governance Deep-Dive",
         "Strategy Deep Dive",
         "Risk Analysis Only",
@@ -438,6 +449,59 @@ if st.session_state.analysis_results:
         with st.expander("View Execution Logs"):
              if final_state.get('log_file_content'): 
                  st.code(final_state['log_file_content'], language='markdown')
+
+    elif run_mode == "Qualitative Deep-Dive":
+        st.info("🧠 **Qualitative Deep-Dive**: comprehensive analysis using Strategy and Risk profiles to drive 'Scuttlebutt' investigation.")
+        
+        qual_res = final_state.get('qualitative_results', {})
+        
+        # We use tabs to organize the heavy output
+        tab_core, tab_scuttle, tab_context, tab_sebi = st.tabs([
+            "📝 Core Analysis", 
+            "🕵️ Scuttlebutt Intel", 
+            "🧩 Context (Strat/Risk)", 
+            "⚖️ SEBI Check"
+        ])
+        
+        with tab_core:
+            st.subheader("Positives & Concerns (Latest Quarter)")
+            st.markdown(qual_res.get('positives_and_concerns', "Analysis not available."))
+            
+            st.divider()
+            
+            st.subheader("Strategic Shift (QoQ)")
+            qoq_data = qual_res.get('qoq_comparison')
+            if qoq_data:
+                try:
+                    # Reuse the dataframe logic for clean display
+                    import json
+                    clean_json = qoq_data.replace("```json", "").replace("```", "").strip()
+                    df_compare = pd.DataFrame(json.loads(clean_json))
+                    st.table(df_compare)
+                except:
+                    st.markdown(qoq_data)
+            else:
+                st.write("No QoQ comparison generated.")
+
+        with tab_scuttle:
+            st.markdown("### 🕵️ Scuttlebutt Investigation")
+            st.markdown("This report synthesizes internal Strategy/Risk data with live external searches.")
+            st.markdown(qual_res.get('scuttlebutt', "No Scuttlebutt report generated."))
+
+        with tab_context:
+            c1, c2 = st.columns(2)
+            with c1:
+                st.subheader("Context: Strategy")
+                st.markdown(final_state.get('strategy_results', "No Strategy Context"))
+            with c2:
+                st.subheader("Context: Risk")
+                st.markdown(final_state.get('risk_results', "No Risk Context"))
+
+        with tab_sebi:
+            st.markdown(qual_res.get('sebi_check', "No SEBI check results."))
+            
+        with st.expander("View Execution Logs"):
+             if final_state.get('log_file_content'): st.code(final_state['log_file_content'], language='markdown')
 
     elif run_mode == "Strategy Deep Dive":
         st.info("🎯 **Strategy Deep Dive**: Analyzes the latest Investor Presentation to identify growth pillars and strategic shifts.")
