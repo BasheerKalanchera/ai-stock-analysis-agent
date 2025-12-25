@@ -40,3 +40,9 @@ beautifulSoup4
 tavily-python
 nest_asyncio
 
+google-genai 
+pyaudio 
+asyncio 
+termcolor
+websockets
+

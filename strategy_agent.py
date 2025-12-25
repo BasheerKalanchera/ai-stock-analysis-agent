@@ -1,7 +1,7 @@
 import logging
 import time
 import random
-import re  # Added for parsing error messages
+import re
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
 from pypdf import PdfReader
@@ -14,6 +14,10 @@ if not logger.handlers:
     formatter = logging.Formatter('%(asctime)s - 🔵 STRATEGY AGENT - %(message)s')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+
+def _chunk_text(text, chunk_size=20000):
+    """Splits text into manageable chunks for the LLM."""
+    return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
 
 def generate_with_retry(model, prompt, max_retries=3, base_delay=30):
     """
@@ -47,7 +51,101 @@ def generate_with_retry(model, prompt, max_retries=3, base_delay=30):
             else:
                 raise e
                 
-    raise Exception(f"Max retries ({max_retries}) exceeded. The API is too busy.")
+    raise Exception(f"Max retries ({max_retries}) exceeded.")
+
+def _map_reduce_strategy(model, ppt_text, credit_text):
+    """
+    Fallback method: Processes PPT in chunks to extract key insights, then synthesizes.
+    """
+    logger.info("⚠️ ACTIVATING FALLBACK: Map-Reduce Strategy (PPT too large for one-shot).")
+    
+    chunks = _chunk_text(ppt_text)
+    extracted_notes = []
+
+    # --- MAP PHASE: Extract value from chunks ---
+    map_prompt_template = """
+    You are a Data Miner for a Hedge Fund. 
+    Analyze this section of an Investor Presentation. Extract ONLY the following (be concise):
+    1. **The "Sales Pitch":** Key marketing slogans, "Optimized Metrics" (Adjusted EBITDA, etc.), and Visual highlights (photos of new plants).
+    2. **Strategic Claims:** Future roadmap, capacity expansion plans, and new product launches.
+    
+    If nothing relevant is found, output "No key data."
+    
+    **PPT Section:**
+    {chunk}
+    """
+
+    for i, chunk in enumerate(chunks):
+        logger.info(f"   > Processing Map Chunk {i+1}/{len(chunks)}...")
+        try:
+            # We use a lower retry count for chunks to fail fast if needed
+            response = generate_with_retry(model, map_prompt_template.format(chunk=chunk), max_retries=2, base_delay=10)
+            extracted_notes.append(response.text)
+            
+            # [ADDED LOG] Confirm chunk completion
+            logger.info(f"   > ✅ Chunk {i+1}/{len(chunks)} extracted successfully.")
+            
+        except Exception as e:
+            logger.warning(f"   > Chunk {i+1} failed: {e}. Skipping.")
+            continue
+        time.sleep(2) # Cooldown between chunks
+
+    combined_notes = "\n".join(extracted_notes)
+    
+    # --- REDUCE PHASE: Final Synthesis ---
+    logger.info("   > Starting Reduce Phase (Synthesis)...")
+    
+    reduce_prompt = f"""
+    You are a Chief Investment Officer (CIO) at a multi-strategy Hedge Fund.
+    Your job is to identify the "Alpha" (Hidden Value) in a company.
+    
+    We have extracted the key notes from the Investor Presentation (The Pitch) and have the full Credit Report (The Reality).
+
+    **PHASE 1: DIAGNOSIS**
+    First, determine the **Investment Category** (Compounder, Aggressor, Turnaround, Special Situation).
+
+    **PHASE 2: SYNTHESIS**
+    Write a High-Conviction Investment Memo in strict Markdown based on these inputs.
+
+    **Inputs:**
+    **Extracted Strategy Notes (from PPT):** {combined_notes[:50000]} 
+
+    **The Reality (Credit Report):** {credit_text}
+
+    ---
+
+    **OUTPUT FORMAT:**
+
+    ### 1. The Narrative Diagnosis
+    **Verdict:** [Category]
+    **The "Elevator Pitch":** [1-2 sentences on why it fits.]
+
+    ### 2. The Sales Pitch (The Highlight Reel)
+    *[Adopt enthusiastic Growth Investor persona]*
+    * **The "Hook":** [Key theme from extracted notes]
+    * **The Visual Centerpiece:** [Physical expansions described]
+    * **"Optimized" Metrics:** [Non-GAAP numbers highlighted]
+
+    ### 3. The "Alpha" Drivers (The Reality Check)
+    *[Adopt skeptical CIO persona. Use the Credit Report to ground the PPT claims]*
+    * **Mix Shift:** High-margin vs low-margin growth.
+    * **Capex Efficiency:** Is FCF about to explode?
+    * **Hidden Assets:** Land/Brands/Patents.
+
+    ### 4. Strategic Pivot & Future Roadmap
+    [Single biggest change in next 3 years based on extracted notes.]
+
+    ### 5. Final Investment Verdict
+    * **Bull Case:**
+    * **Bear Case:**
+    """
+    
+    final_response = generate_with_retry(model, reduce_prompt, max_retries=3, base_delay=30)
+    
+    # [ADDED LOG] Confirm Reduce completion
+    logger.info("   > ✅ Reduce Phase (Synthesis) complete.")
+    
+    return final_response.text
 
 def strategy_analyst_agent(file_buffers, api_key, model_name):
     """
@@ -85,6 +183,7 @@ def strategy_analyst_agent(file_buffers, api_key, model_name):
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(model_name) 
 
+        # --- ATTEMPT 1: ONE-SHOT (Preferred for coherence) ---
         prompt = f"""
         You are a Chief Investment Officer (CIO) at a multi-strategy Hedge Fund.
         Your job is to identify the "Alpha" (Hidden Value) in a company by analyzing its Investor Presentation (The Pitch) and Credit Report (The Reality).
@@ -111,6 +210,7 @@ def strategy_analyst_agent(file_buffers, api_key, model_name):
 
         **Inputs:**
         **The Pitch (PPT):** {ppt_text[:60000]} 
+        **The Reality (Credit Report):** {credit_text}
 
         ---
 
@@ -141,9 +241,19 @@ def strategy_analyst_agent(file_buffers, api_key, model_name):
         """
 
         response = generate_with_retry(model, prompt)
-        logger.info("Analysis complete.")
+        logger.info("One-Shot Analysis complete.")
         return response.text
 
     except Exception as e:
-        logger.error(f"LLM Generation failed: {e}")
-        return f"### Error\nFailed to generate strategy profile: {str(e)}"
+        # Check if the error is related to retries/overload
+        if "Max retries" in str(e) or "429" in str(e) or "ResourceExhausted" in str(e):
+            logger.warning(f"One-Shot failed due to limits. Switching to Map-Reduce strategy... (Error: {str(e)})")
+            try:
+                # --- ATTEMPT 2: MAP-REDUCE FALLBACK ---
+                return _map_reduce_strategy(model, ppt_text, credit_text)
+            except Exception as map_e:
+                logger.error(f"Map-Reduce Strategy also failed: {map_e}")
+                return f"### Error\nFailed to generate strategy profile (both One-Shot and Map-Reduce failed): {str(map_e)}"
+        else:
+            logger.error(f"LLM Generation failed: {e}")
+            return f"### Error\nFailed to generate strategy profile: {str(e)}"
