@@ -671,14 +671,22 @@ def isolated_qualitative_node(state: StockAnalysisState) -> Dict[str, Any]:
         state['file_data'].get("latest_transcript"),
         state['file_data'].get("previous_transcript"),
         config,
-        strat=strategy_ctx, # Pass context
-        risk=risk_ctx       # Pass context
+        # --- FIX 1: MATCH EXACT ARGUMENT NAMES ---
+        strategy_context=strategy_ctx, 
+        risk_context=risk_ctx
     )
     
     log_entry = "## QUAL DEEP-DIVE: ANALYSIS COMPLETE\n\n"
+    
+    # --- FIX 2: LOG ERRORS IF THEY HAPPEN ---
     if isinstance(results, dict):
         for key, value in results.items():
-            log_entry += f"### {key.replace('_', ' ').title()}: {str(value)[:200]}...\n"
+            val_str = str(value) if value else "None"
+            log_entry += f"### {key.replace('_', ' ').title()}: {val_str[:200]}...\n"
+    else:
+        # If 'results' is a string, it's likely an error message from fallback
+        log_entry += f"❌ Analysis Failed or Returned Invalid Data: {results}\n"
+
     log_entry += "\n---\n"
     
     return {
