@@ -9,7 +9,6 @@ from typing import Dict, Any, List
 from state import StockAnalysisState
 
 # --- Import Agent Functions ---
-# These are assumed to exist in the same directory based on original file
 from Screener_Download import download_financial_data
 from qualitative_analysis_agent import (
     run_qualitative_analysis, 
@@ -156,8 +155,9 @@ def qualitative_analysis_node(state: StockAnalysisState):
         state['file_data'].get("latest_transcript"),
         state['file_data'].get("previous_transcript"),
         config,
-        strat=strategy_ctx,
-        risk=risk_ctx
+        # --- FIXED ARGUMENT NAMES HERE ---
+        strategy_context=strategy_ctx,
+        risk_context=risk_ctx
     )
     
     log_entry = "## AGENT 5: QUALITATIVE ANALYSIS\n\n"
@@ -671,14 +671,13 @@ def isolated_qualitative_node(state: StockAnalysisState) -> Dict[str, Any]:
         state['file_data'].get("latest_transcript"),
         state['file_data'].get("previous_transcript"),
         config,
-        # --- FIX 1: MATCH EXACT ARGUMENT NAMES ---
+        # --- FIXED ARGUMENT NAMES HERE ---
         strategy_context=strategy_ctx, 
         risk_context=risk_ctx
     )
     
     log_entry = "## QUAL DEEP-DIVE: ANALYSIS COMPLETE\n\n"
     
-    # --- FIX 2: LOG ERRORS IF THEY HAPPEN ---
     if isinstance(results, dict):
         for key, value in results.items():
             val_str = str(value) if value else "None"

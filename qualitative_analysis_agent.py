@@ -56,6 +56,49 @@ def _extract_text_from_pdf_buffer(pdf_buffer: io.BytesIO | None) -> str:
         logger.error(f"Error reading PDF from buffer: {e}")
         return ""
 
+# --- NEW: DETAILED TAVILY ERROR HANDLER ---
+
+def _handle_tavily_error(e: Exception, context: str) -> str:
+    """
+    Introspects Tavily/HTTP exceptions to log specific Rate Limit headers or Status Codes.
+    """
+    error_msg = str(e)
+    
+    # 1. Check for HTTP Status Code attributes (common in requests/httpx libs)
+    # The Tavily Python client wraps requests, so we look for .response or .status_code
+    status_code = None
+    headers = {}
+    
+    if hasattr(e, 'response') and e.response:
+        status_code = getattr(e.response, 'status_code', None)
+        headers = getattr(e.response, 'headers', {})
+    elif hasattr(e, 'status_code'):
+        status_code = e.status_code
+
+    # 2. Construct Detailed Log
+    log_prefix = f"❌ {context} FAILED:"
+    
+    if "plan's set usage limit" in error_msg or (status_code and status_code in [402, 403]):
+        logger.error(f"{log_prefix} PLAN QUOTA EXCEEDED (Hard Limit).")
+        logger.error("   Action: You need to upgrade your Tavily plan or wait for the monthly reset.")
+    
+    elif status_code == 429:
+        logger.warning(f"{log_prefix} RATE LIMIT HIT (Throttling).")
+        # Try to find reset headers
+        reset_time = headers.get('x-ratelimit-reset') or headers.get('Retry-After')
+        if reset_time:
+            logger.warning(f"   API indicates reset in/at: {reset_time}")
+        else:
+            logger.warning("   No reset header provided by API.")
+
+    else:
+        logger.error(f"{log_prefix} Generic Error.")
+    
+    # Always print the raw debug info for the user
+    logger.error(f"   DEBUG INFO -> Status: {status_code} | Msg: {error_msg}")
+    
+    return error_msg
+
 # --- TOOL COMPONENTS ---
 
 def _search_tool(query: str, api_key: str = None, required_keywords: List[str] = None) -> str:
@@ -66,11 +109,16 @@ def _search_tool(query: str, api_key: str = None, required_keywords: List[str] =
         try:
             logger.info(f"🔎 Executing TAVILY Search: {query}")
             client = TavilyClient(api_key=api_key)
+            # Tavily client usually raises exceptions on 4xx/5xx
             response = client.search(query, search_depth="advanced", max_results=20)
             raw_results = response.get("results", [])
             source_name = "Tavily"
         except Exception as e:
-            logger.error(f"Tavily Search failed: {e}.")
+            # UPDATED: Use the detailed error handler
+            _handle_tavily_error(e, "Tavily Search Tool")
+            # Don't return here immediately if you want to handle graceful degradation, 
+            # but usually, if search fails, we return a failure message.
+            return f"Search failed: {str(e)}"
     else:
         if not TavilyClient:
             logger.error("TavilyClient not imported. Install via 'pip install tavily-python'.")
@@ -122,24 +170,32 @@ def _perform_scuttlebutt_search(company_name: str, api_key: str) -> str:
         for q in queries:
             logger.info(f"🔎 Deep-Dive Query: {q}")
             time.sleep(1.5) 
-            response = tavily.search(query=q, search_depth="advanced", max_results=5)
-            results = response.get('results', [])
+            try:
+                response = tavily.search(query=q, search_depth="advanced", max_results=5)
+                results = response.get('results', [])
+                
+                for res in results:
+                    try:
+                        domain = urlparse(res['url']).netloc.replace("www.", "")
+                        if res['title'].strip().lower() in ["pdf", "document", "untitled"]:
+                            clean_title = f"Document/Filing from {domain}"
+                        else:
+                            clean_title = f"{res['title']} ({domain})"
+                    except:
+                        clean_title = res['title']
+                    aggregated_context += f"- Source: {clean_title}\n  URL: {res['url']}\n  Content: {res['content']}\n\n"
             
-            for res in results:
-                try:
-                    domain = urlparse(res['url']).netloc.replace("www.", "")
-                    if res['title'].strip().lower() in ["pdf", "document", "untitled"]:
-                        clean_title = f"Document/Filing from {domain}"
-                    else:
-                        clean_title = f"{res['title']} ({domain})"
-                except:
-                    clean_title = res['title']
-                aggregated_context += f"- Source: {clean_title}\n  URL: {res['url']}\n  Content: {res['content']}\n\n"
+            except Exception as e:
+                # UPDATED: Use detailed error handler inside the loop
+                # We do NOT return immediately, we break the loop to return partial results if any
+                _handle_tavily_error(e, "Scuttlebutt Partial Search")
+                aggregated_context += f"\n[System Note: Search for '{q}' failed due to API limits.]\n"
+                break # Stop trying subsequent queries if we hit a limit
         
         return aggregated_context
 
     except Exception as e:
-        logger.error(f"Scuttlebutt Search Failed: {e}")
+        _handle_tavily_error(e, "Scuttlebutt Initialization")
         return f"Search failed due to error: {str(e)}"
 
 # --- GEMINI CORE FUNCTIONS ---
