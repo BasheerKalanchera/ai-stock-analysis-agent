@@ -45,63 +45,23 @@ def _chunk_text(text: str, chunk_size: int = 25000) -> list[str]:
     return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
 
 def _extract_text_from_pdf_buffer(pdf_buffer: io.BytesIO | None) -> str:
+    logger.info("Starting PDF text extraction...")
     if not pdf_buffer: return ""
     try:
-        logger.info("Extracting text from PDF...")
         with fitz.open(stream=pdf_buffer.getvalue(), filetype="pdf") as doc:
             full_text = "".join(page.get_text() for page in doc)
-        logger.info(f"PDF Extraction Complete. Length: {len(full_text)} chars")
+        logger.info(f"Finished PDF text extraction. ({len(full_text)} chars)")
         return full_text
     except Exception as e:
         logger.error(f"Error reading PDF from buffer: {e}")
         return ""
 
-# --- NEW: DETAILED TAVILY ERROR HANDLER ---
-
-def _handle_tavily_error(e: Exception, context: str) -> str:
-    """
-    Introspects Tavily/HTTP exceptions to log specific Rate Limit headers or Status Codes.
-    """
-    error_msg = str(e)
-    
-    # 1. Check for HTTP Status Code attributes (common in requests/httpx libs)
-    # The Tavily Python client wraps requests, so we look for .response or .status_code
-    status_code = None
-    headers = {}
-    
-    if hasattr(e, 'response') and e.response:
-        status_code = getattr(e.response, 'status_code', None)
-        headers = getattr(e.response, 'headers', {})
-    elif hasattr(e, 'status_code'):
-        status_code = e.status_code
-
-    # 2. Construct Detailed Log
-    log_prefix = f"❌ {context} FAILED:"
-    
-    if "plan's set usage limit" in error_msg or (status_code and status_code in [402, 403]):
-        logger.error(f"{log_prefix} PLAN QUOTA EXCEEDED (Hard Limit).")
-        logger.error("   Action: You need to upgrade your Tavily plan or wait for the monthly reset.")
-    
-    elif status_code == 429:
-        logger.warning(f"{log_prefix} RATE LIMIT HIT (Throttling).")
-        # Try to find reset headers
-        reset_time = headers.get('x-ratelimit-reset') or headers.get('Retry-After')
-        if reset_time:
-            logger.warning(f"   API indicates reset in/at: {reset_time}")
-        else:
-            logger.warning("   No reset header provided by API.")
-
-    else:
-        logger.error(f"{log_prefix} Generic Error.")
-    
-    # Always print the raw debug info for the user
-    logger.error(f"   DEBUG INFO -> Status: {status_code} | Msg: {error_msg}")
-    
-    return error_msg
-
 # --- TOOL COMPONENTS ---
 
 def _search_tool(query: str, api_key: str = None, required_keywords: List[str] = None) -> str:
+    """
+    Standard Search Tool (Tavily Only - DDG Removed)
+    """
     raw_results = []
     source_name = "Unknown"
 
@@ -109,16 +69,11 @@ def _search_tool(query: str, api_key: str = None, required_keywords: List[str] =
         try:
             logger.info(f"🔎 Executing TAVILY Search: {query}")
             client = TavilyClient(api_key=api_key)
-            # Tavily client usually raises exceptions on 4xx/5xx
             response = client.search(query, search_depth="advanced", max_results=20)
             raw_results = response.get("results", [])
             source_name = "Tavily"
         except Exception as e:
-            # UPDATED: Use the detailed error handler
-            _handle_tavily_error(e, "Tavily Search Tool")
-            # Don't return here immediately if you want to handle graceful degradation, 
-            # but usually, if search fails, we return a failure message.
-            return f"Search failed: {str(e)}"
+            logger.error(f"Tavily Search failed: {e}.")
     else:
         if not TavilyClient:
             logger.error("TavilyClient not imported. Install via 'pip install tavily-python'.")
@@ -152,11 +107,15 @@ def _search_tool(query: str, api_key: str = None, required_keywords: List[str] =
     return output
 
 def _perform_scuttlebutt_search(company_name: str, api_key: str) -> str:
+    """
+    Deep Dive Search Helper (Preserved Detailed Queries)
+    """
     if not api_key:
         return "Warning: TAVILY_API_KEY not found. Search skipped."
 
     try:
         tavily = TavilyClient(api_key=api_key)
+        # PRESERVED: Specific Investigative Queries
         queries = [
             f"{company_name} management interview transcripts outlook 2025 key takeaways",
             f"{company_name} channel checks dealers distributors complaints margins vs competitors",
@@ -169,33 +128,25 @@ def _perform_scuttlebutt_search(company_name: str, api_key: str) -> str:
         
         for q in queries:
             logger.info(f"🔎 Deep-Dive Query: {q}")
-            time.sleep(1.5) 
-            try:
-                response = tavily.search(query=q, search_depth="advanced", max_results=5)
-                results = response.get('results', [])
-                
-                for res in results:
-                    try:
-                        domain = urlparse(res['url']).netloc.replace("www.", "")
-                        if res['title'].strip().lower() in ["pdf", "document", "untitled"]:
-                            clean_title = f"Document/Filing from {domain}"
-                        else:
-                            clean_title = f"{res['title']} ({domain})"
-                    except:
-                        clean_title = res['title']
-                    aggregated_context += f"- Source: {clean_title}\n  URL: {res['url']}\n  Content: {res['content']}\n\n"
+            time.sleep(1.0) # Small politeness delay for API
+            response = tavily.search(query=q, search_depth="advanced", max_results=5)
+            results = response.get('results', [])
             
-            except Exception as e:
-                # UPDATED: Use detailed error handler inside the loop
-                # We do NOT return immediately, we break the loop to return partial results if any
-                _handle_tavily_error(e, "Scuttlebutt Partial Search")
-                aggregated_context += f"\n[System Note: Search for '{q}' failed due to API limits.]\n"
-                break # Stop trying subsequent queries if we hit a limit
+            for res in results:
+                try:
+                    domain = urlparse(res['url']).netloc.replace("www.", "")
+                    if res['title'].strip().lower() in ["pdf", "document", "untitled"]:
+                        clean_title = f"Document/Filing from {domain}"
+                    else:
+                        clean_title = f"{res['title']} ({domain})"
+                except:
+                    clean_title = res['title']
+                aggregated_context += f"- Source: {clean_title}\n  URL: {res['url']}\n  Content: {res['content']}\n\n"
         
         return aggregated_context
 
     except Exception as e:
-        _handle_tavily_error(e, "Scuttlebutt Initialization")
+        logger.error(f"Scuttlebutt Search Failed: {e}")
         return f"Search failed due to error: {str(e)}"
 
 # --- GEMINI CORE FUNCTIONS ---
@@ -287,11 +238,6 @@ def _manual_react_loop(prompt: str, analysis_type: str, model_name: str, tavily_
     return "Analysis timed out."
 
 def _analyze_with_tools(prompt: str, analysis_type: str, model_name: str, agent_config: dict, filter_keywords: List[str] = None) -> str:
-    """
-    Hybrid Tool Executor:
-    - Uses Manual ReAct Loop for 'gemma' models (more reliable for lightweight models)
-    - Uses Native Tool Calling for 'gemini' models (better integration)
-    """
     api_key = agent_config.get("GOOGLE_API_KEY")
     tavily_key = agent_config.get("TAVILY_API_KEY") 
     if not api_key: return "Missing Google API Key."
@@ -302,7 +248,7 @@ def _analyze_with_tools(prompt: str, analysis_type: str, model_name: str, agent_
     if is_gemma:
         return _manual_react_loop(prompt, analysis_type, model_name, tavily_key=tavily_key, filter_keywords=filter_keywords)
     else:
-        # NATIVE TOOL USE RESTORED
+        # Native Tool Use
         def search_tool_wrapper(query: str): 
             return _search_tool(query, api_key=tavily_key, required_keywords=filter_keywords)
             
@@ -317,28 +263,50 @@ def _analyze_with_tools(prompt: str, analysis_type: str, model_name: str, agent_
             logger.error(f"Tool Analysis Failed: {e}")
             return f"Tool analysis failed: {str(e)}"
 
-# --- ANALYSIS SUB-AGENTS ---
+# --- ANALYSIS SUB-AGENTS (PRESERVED DETAILED PROMPTS) ---
 
 def _sebi_sync(company_name: str, agent_config: dict) -> str:
-    logger.info("Starting SEBI/Regulatory analysis...")
+    logger.info("Starting SEBI/Regulatory analysis (Detailed Check)...")
     clean_name = company_name.replace("Limited", "").replace("Ltd", "").replace("India", "").strip()
     filter_keywords = [clean_name]
 
+    # PRESERVED: The Detailed 9-Rule Prompt
     prompt = f"""
-    You are a **STRICT Regulatory Compliance Auditor**. Check for violations for **{company_name}**.
+    You are a **STRICT Regulatory Compliance Auditor**. Your task is to verify if **{company_name}** (the specific Indian listed entity) has any confirmed regulatory violations.
     
     **Action:**
-    Perform ONE comprehensive search: "{company_name} India regulatory violations SEBI RBI tax penalty lawsuit litigation fraud verdict"
+    Perform ONE comprehensive search using a query like: 
+    > "{company_name} India regulatory violations SEBI RBI tax penalty lawsuit litigation fraud verdict"
     
-    **AUDIT RULES:**
-    1. **EXACT MATCH ONLY:** Ignore vendors, partners, or general industry news.
-    2. **IGNORE BOILERPLATE:** "Nothing has come to our attention" is CLEAN.
-    3. **OUTPUT:**
-       **Status:** [CLEAN / WARNING / CRITICAL]
-       **Executive Summary:** (1-2 sentences)
-       **Key Findings:** (Bullet points with YYYY-MM-DD dates, Newest First)
-       
-       If no violations: "Status: CLEAN. No significant regulatory violations found."
+    **AUDIT RULES (ZERO TOLERANCE FOR IRRELEVANCE):**
+    1.  **EXACT MATCH ONLY:** You must ONLY report findings where **{company_name}** is explicitly the accused party.
+    2.  **IGNORE VENDOR NEWS:** If the company is mentioned as a **service provider, vendor, or technology partner** to a regulator (e.g., "TCS wins SEBI contract", "Infosys builds MCA portal"), **DELETE IT**.
+    3.  **REJECT CONTEXT:** If a search result discusses a fraud at a *different* company (e.g., Satyam, Ricoh, Mishtann), **DELETE IT**.
+    4.  **REJECT GENERALITIES:** If a result says "SEBI tightened rules for all brokers," **DELETE IT**.
+    5.  **IGNORE LEGAL DEFINITIONS:** If terms like "Fraudulent Borrower" or "Wilful Defaulter" appear ONLY in a 'Definitions' or 'Declarations' section of a document (like a DRHP/Prospectus), **DELETE IT**. Only report if the company is affirmatively identified as one.
+    6.  **IGNORE AUDITOR BOILERPLATE:** Phrases like "nothing has come to our attention that causes us to believe that the statement contains material misstatement" are standard **CLEAN** reports. Do NOT flag these as violations. Only flag if the auditor explicitly uses terms like **"Qualified Opinion"**, **"Adverse Opinion"**, or **"Basis for Qualified Conclusion"**.
+    7.  **INCLUDE TAX/LEGAL:** Report material GST/Customs penalties, Income Tax raids, and major foreign litigation.
+    8.  **NO NEUTRAL FILLER (CRITICAL):** Do **NOT** list routine corporate events like "Board Meeting Outcomes", "Annual Reports", "IPO Filings", "Name Changes", or "Award Wins". If a search result is just a neutral document or announcement, **IGNORE IT**.
+    9.  **CLEAN VERDICT:** If the search results contain no direct violations for **{company_name}**, your output must be:
+        "Status: CLEAN. No significant regulatory violations found in recent public records for {company_name}."
+    
+    **Output Format:**
+    Strictly follow this layout. Ensure there is a blank line between each section.
+    
+    **Status:** [CLEAN / WARNING / CRITICAL]
+    
+    **Executive Summary:**
+    (1-2 sentences. Direct facts only. No fluff.)
+    
+    **Key Findings:**
+    (Bullet points with Dates and Source Snippets. **Sort by Newest First.**)
+
+    **CRITICAL SORTING & FORMATTING INSTRUCTION:**
+    1. **STANDARDIZE DATES:** Start EVERY bullet point with the date in **YYYY-MM-DD** format. If the exact day is unknown, use YYYY-MM-01.
+    2. **REVERSE CHRONOLOGICAL:** You **MUST** order the list so the most recent date (e.g., 2025-12-01) is at the TOP, and the oldest date (e.g., 2021-01-01) is at the BOTTOM.
+    3. **Example Format:**
+       * **2025-08-15:** [Details of violation...] (Source: ...)
+       * **2024-11-20:** [Details of violation...] (Source: ...)
     """
     
     return _analyze_with_tools(
@@ -358,7 +326,8 @@ def _analyze_positives_and_concerns(transcript_text: str, agent_config: dict) ->
     prompt = f"""
     Based ONLY on the provided earnings conference call transcript, identify the key positives and areas of concern.
     Structure your answer with two clear headings: "Positives" and "Areas of Concern".
-    Use bullet points and quote relevant phrases.
+    Under each heading, use bullet points to list the key takeaways.
+    Directly quote relevant phrases or sentences from the transcript to support each point.
     **Transcript:**
     ---
     {transcript_text}
@@ -376,7 +345,7 @@ def _analyze_positives_and_concerns(transcript_text: str, agent_config: dict) ->
     if "Could not generate" not in direct_result and "Rate limit exceeded" not in direct_result: 
         return direct_result
     
-    # 3. Fallback: Map-Reduce (Restored)
+    # 3. Fallback: Map-Reduce
     logger.warning("Direct Analysis failed or hit limits. Switching to Map-Reduce Fallback Strategy...")
     chunks = _chunk_text(transcript_text, chunk_size=24000)
     chunk_summaries = []
@@ -385,8 +354,8 @@ def _analyze_positives_and_concerns(transcript_text: str, agent_config: dict) ->
         logger.info(f"Processing Fallback Map Chunk {i+1}/{len(chunks)}...")
         chunk_prompt = f"""
         Analyze this PARTIAL SECTION of an earnings call transcript.
-        Extract any key "Positives" and "Areas of Concern".
-        Be concise.
+        Extract any key "Positives" (Growth, wins, margin expansion) and "Areas of Concern" (Headwinds, cost pressure, delays).
+        Be concise. If no significant points are found in this section, reply with "No key points".
         **Transcript Part {i+1}:**
         ---
         {chunk}
@@ -403,9 +372,12 @@ def _analyze_positives_and_concerns(transcript_text: str, agent_config: dict) ->
 
     combined_summaries = "\n\n".join(chunk_summaries)
     final_prompt = f"""
-    Consolidate these partial points into one final report.
+    You are an expert financial analyst. Below are summaries extracted from different parts of an earnings call transcript.
+    Your task is to consolidate these partial points into one final, coherent report.
     1. Remove duplicates.
-    2. Structure: "Positives" and "Areas of Concern".
+    2. Merge related points.
+    3. Structure your answer with two clear headings: "Positives" and "Areas of Concern".
+    4. Use bullet points.
     **Combined Summaries:**
     ---
     {combined_summaries}
@@ -417,16 +389,41 @@ def _analyze_positives_and_concerns(transcript_text: str, agent_config: dict) ->
     )
 
 def _compare_transcripts(latest_analysis: str, previous_analysis: str, agent_config: dict) -> str:
+    # PRESERVED: Detailed JSON Comparison Prompt
     prompt = f"""
-    Compare the company's performance based on these two summaries.
-    **CRITICAL:** Output a SINGLE valid JSON array. No markdown.
-    Keys: "Metric", "Latest Quarter Analysis", "Previous Quarter Analysis".
-    Escape newlines as \\n.
-    
-    **Latest:** {latest_analysis[:10000]}
-    **Previous:** {previous_analysis[:10000]}
+    You are an expert financial analyst. Your task is to compare the company's performance based on the provided **analysis summaries** of the last two quarters.
+    **CRITICAL INSTRUCTION:** You **must** generate your response as a single, valid JSON array of objects. Do not include any text, code blocks, or explanations before or after the JSON.
+    The JSON array must contain objects with these exact keys:
+    1.  "Metric"
+    2.  "Latest Quarter Analysis"
+    3.  "Previous Quarter Analysis"
+    **FORMATTING:** For the analysis values, use a single string. Inside that string, use Markdown bullets (`* `).
+    **IMPORTANT:** All newlines inside the JSON strings **MUST be escaped as `\\n`**. Do not use literal newlines.
+    **JSON STRUCTURE EXAMPLE (Note the `\\n`):**
+    [
+      {{
+        "Metric": "Overall Sentiment Shift",
+        "Latest Quarter Analysis": "* The tone is cautious.\\n* Focus on cost cutting.",
+        "Previous Quarter Analysis": "* The tone was optimistic.\\n* Focus on expansion."
+      }}
+    ]
+    **You must include rows for at least the following metrics:**
+    * Overall Sentiment Shift
+    * Financial & Operational Highlights
+    * Segment Performance
+    * Outlook & Guidance
+    * Key Concerns / New Issues
+    **Latest Quarter Analysis Summary:**
+    ---
+    {latest_analysis}
+    ---
+    **Previous Quarter Analysis Summary:**
+    ---
+    {previous_analysis}
+    ---
+    **Your Output (VALID JSON array only):**
     """
-    return _analyze_with_gemini(prompt, "QoQ Comparison", agent_config.get("LITE_MODEL_NAME", "gemini-1.5-flash"), agent_config.get("GOOGLE_API_KEY"))
+    return _analyze_with_gemini(prompt, "Quarter-over-Quarter Comparison", agent_config.get("LITE_MODEL_NAME", "gemini-1.5-flash"), agent_config.get("GOOGLE_API_KEY"))
 
 def _scuttlebutt_sync(company_name: str, context_text: str, agent_config: dict) -> str:
     logger.info("Starting Scuttlebutt analysis...")
@@ -440,24 +437,37 @@ def _scuttlebutt_sync(company_name: str, context_text: str, agent_config: dict) 
 
     combined_context = f"{search_context}\n\n### INTERNAL NOTES:\n{context_text}"
     
+    # PRESERVED: Detailed Scuttlebutt Prompt
     prompt = f"""
-    You are a forensic financial investigator (Philip Fisher style) for: **{company_name}**.
-    Use the provided search results and internal notes.
-    
-    **GOALS:**
-    1. Channel Checks (Dealers, distributors, margin pressure?)
-    2. Management Integrity (Raids, SEBI orders?)
-    3. Brand Perception (Glassdoor, Consumer forums?)
-    4. Strategic Reality Check (Promises vs Delivery?)
-    
-    **FORMAT:** Markdown report. Cite sources like [Mint], [Glassdoor].
-    
-    **CONTEXT:**
+    You are a forensic financial investigator executing Philip Fisher's "Scuttlebutt" methodology for: **{company_name}**.
+
+    ### INPUT CONTEXT (GROUND TRUTH)
+    The following are **real-time search results** and analysis notes. 
+    **CRITICAL INSTRUCTION:** You must answer the questions using **ONLY** this information. 
+    Do NOT invent names, dates, or figures.
+    If the search results say the CEO is "X", do not say it is "Y".
+    If a source is labeled "PDF" or "Document", use the domain name provided in the source description for clarity (e.g., "BSE Filing", "Broker Report").
+
     {combined_context[:50000]}
+
+    ### ANALYSIS GOALS (DEEP DIVE)
+    Synthesize the findings into a **Detailed Investigative Report**. Avoid generic statements; look for specific anecdotes, numbers, and dates.
+    
+    1.  **Channel Checks & Competitive Position:** * Do not just say "competitive market". Identifying specific complaints from dealers or distributors? 
+        * Are margins being squeezed? Who is taking market share?
+    2.  **Management Integrity & Governance:** * Look for details on recent tax raids, SEBI orders, or whistle-blower complaints. 
+        * Verify the names of Key Managerial Personnel against the search text.
+    3.  **Real-World Brand Perception:** * Go beyond "good brand". What are the specific recurring complaints on Glassdoor or Consumer Forums?
+    4.  **Strategic Shift & Outlook:** * What did management specifically promise in the latest interview vs what are they delivering?
+    5.  **Red Flags:** * Highlight any forensic risks, frequent auditor resignations, or related party transactions found in the text.
+
+    ### FORMAT
+    Return the response in Markdown. 
+    **CITATION RULE:** Cite the specific source (e.g., [Mint Article], [BSE Filing]) for every major claim. Do not just use [PDF].
     """
     return _analyze_with_gemini(prompt, "Scuttlebutt Analysis", agent_config.get("HEAVY_MODEL_NAME", "gemini-1.5-pro"), agent_config.get("GOOGLE_API_KEY"))
 
-# --- MAIN ORCHESTRATOR (SEQUENTIAL) ---
+# --- MAIN ORCHESTRATOR (SEQUENTIAL RESTORED) ---
 
 def run_qualitative_analysis(
     company_name: str, latest_transcript_buffer: io.BytesIO | None, previous_transcript_buffer: io.BytesIO | None,
