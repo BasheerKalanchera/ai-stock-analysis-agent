@@ -122,7 +122,7 @@ def download_financial_data(
 
     try:
         logger.info("Initializing Chrome Driver...")
-        target_version = 142 if platform.system() != "Linux" else None
+        target_version = 144  # Match Chrome version on Streamlit Cloud
 
         try:
             options = get_chrome_options()
