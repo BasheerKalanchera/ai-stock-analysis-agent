@@ -17,6 +17,58 @@ from state import StockAnalysisState
 st.set_page_config(page_title="Stock Research Workbench", page_icon="🤖", layout="wide")
 load_dotenv()
 
+# --- PostgreSQL Checkpointer Setup ---
+@st.cache_resource
+def setup_checkpointer():
+    """Initialize PostgreSQL checkpointer for crash recovery.
+    Returns None if DATABASE_URL is not configured (app works without it)."""
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        try:
+            db_url = st.secrets.get("DATABASE_URL")
+        except (FileNotFoundError, KeyError, st.errors.StreamlitAPIException):
+            pass
+    
+    if not db_url:
+        return None
+    
+    try:
+        import psycopg
+        from psycopg_pool import ConnectionPool
+        from langgraph.checkpoint.postgres import PostgresSaver
+        from checkpointer_serde import StockAnalysisSerializer
+        
+        # Run one-time table/index creation with autocommit (required by Postgres)
+        with psycopg.connect(db_url, autocommit=True) as setup_conn:
+            PostgresSaver(setup_conn).setup()
+        
+        # Create connection pool for runtime checkpointing (min_size=0 + check_connection + keepalives)
+        pool = ConnectionPool(
+            conninfo=db_url, 
+            min_size=0, 
+            max_size=3,
+            kwargs={
+                'autocommit': True,
+                'keepalives': 1,
+                'keepalives_idle': 30,
+                'keepalives_interval': 10,
+                'keepalives_count': 5
+            }, # checkpointer handles transactions internally
+            check=ConnectionPool.check_connection # Verify connection before use!
+        )
+        serde = StockAnalysisSerializer()
+        checkpointer = PostgresSaver(conn=pool, serde=serde)
+        
+        # Recompile all graphs with the checkpointer
+        graphs.recompile_with_checkpointer(checkpointer)
+        return checkpointer
+    except Exception as e:
+        st.sidebar.warning(f"⚠️ Checkpointer disabled: {e}")
+        return None
+
+# Initialize checkpointer (runs once, cached by Streamlit)
+checkpointer = setup_checkpointer()
+
 # --- Configuration & Secret Handling ---
 def get_secret(key, default=None):
     try:
@@ -43,23 +95,53 @@ agent_configs = {
     "IS_CLOUD_ENV": is_cloud_env
 }
 
+import re
+
 # --- Helper Function for UI ---
 def extract_investment_thesis(full_report: str) -> str:
     try:
-        search_key = "Investment Thesis"
-        start_index = full_report.lower().find(search_key.lower())
-        if start_index == -1: return "Investment thesis could not be extracted."
-        content_start_index = full_report.find('\n', start_index) + 1
-        next_section_index = full_report.find("\n## ", content_start_index)
-        if next_section_index == -1:
-            return full_report[content_start_index:].strip()
-        return full_report[content_start_index:next_section_index].strip()
+        # 1. Flexible regex search for Header (case-insensitive)
+        # Matches: "# Investment Thesis", "## Investment Summary", "Investment Thesis\n", etc.
+        match = re.search(r'(?i)(#+\s*Investment\s*(Thesis|Summary)|Investment\s*(Thesis|Summary)\s*\n)', full_report)
+        
+        if match:
+            start_pos = match.end()
+            # Find next header (## or ###) or end of string
+            next_header = re.search(r'\n#+\s', full_report[start_pos:])
+            if next_header:
+                return full_report[start_pos:start_pos + next_header.start()].strip()
+            return full_report[start_pos:].strip()
+            
+        # 2. Fallback: If report is reasonably short, show the whole thing
+        if len(full_report) < 2000:
+            return full_report
+
+        # 3. Last Resort
+        return "Investment Thesis section header not found. Please view the full report in the 'Deep-Dive Data' tab."
     except Exception:
-        return "Investment thesis could not be extracted."
+        return "Investment thesis extraction failed."
+
+# --- Checkpoint Cleanup ---
+def cleanup_checkpoint(ticker_symbol, workflow_mode):
+    """Remove checkpoint data for a completed run to keep the DB clean."""
+    if not checkpointer:
+        return
+    thread_id = f"{ticker_symbol}-{workflow_mode.replace(' ', '_').replace('(', '').replace(')', '')}"
+    try:
+        with checkpointer.conn.connection() as conn:
+            conn.execute("DELETE FROM checkpoint_writes WHERE thread_id = %s", (thread_id,))
+            conn.execute("DELETE FROM checkpoints WHERE thread_id = %s", (thread_id,))
+    except Exception:
+        pass  # Non-critical — don't break the app if cleanup fails
 
 # --- Runner Function ---
-def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_container, progress_text_container, workflow_mode):
-    inputs = {
+def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_container, progress_text_container, workflow_mode, resume_mode=False):
+    # Deterministic thread ID: same ticker + workflow always maps to same thread
+    thread_id = f"{ticker_symbol}-{workflow_mode.replace(' ', '_').replace('(', '').replace(')', '')}"
+    stream_config = {"configurable": {"thread_id": thread_id}}
+    
+    # Smart resume: auto-detect checkpoint status per ticker
+    fresh_inputs = {
         "ticker": ticker_symbol,
         "log_file_content": f"# Analysis Log for {ticker_symbol} (Mode: {workflow_mode})\n\n",
         "is_consolidated": is_consolidated_flag,
@@ -67,11 +149,52 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
         "workflow_mode": workflow_mode
     }
     
+    # Select target graph first (needed for checkpoint lookup)
+    graph_map = {
+        "Quantitative Deep-Dive": graphs.quant_only_graph,
+        "Qualitative Deep-Dive": graphs.qualitative_only_graph,
+        "Strategy Deep Dive": graphs.strategy_only_graph,
+        "Valuation & Governance Deep-Dive": graphs.valuation_only_graph,
+        "Risk Analysis Only": graphs.risk_only_graph,
+        "SEBI Violations Check (MVP)": graphs.sebi_workflow,
+        "Latest Concall Analysis": graphs.earnings_graph,
+        "QoQ Concall Analysis": graphs.strategy_shift_graph,
+        "Scuttlebutt Research": graphs.scuttlebutt_graph,
+    }
+    target_graph = graph_map.get(workflow_mode, graphs.app_graph)
+    
+    resume_next_node = None  # Track which node we're resuming from
+    
+    if resume_mode and checkpointer:
+        try:
+            existing_state = target_graph.get_state(stream_config)
+            if existing_state and existing_state.values:
+                if not existing_state.next:
+                    # Graph already completed — skip entirely (instant)
+                    progress_text_container.write(f"⏭️ {ticker_symbol} already completed — skipping")
+                    result = dict(existing_state.values)
+                    result['ticker'] = ticker_symbol
+                    result['workflow_mode'] = workflow_mode
+                    return result
+                else:
+                    # Partial checkpoint — resume from where it left off
+                    inputs = None
+                    resume_next_node = existing_state.next[0]
+                    next_nodes = ", ".join(existing_state.next)
+                    progress_text_container.write(f"🔄 Resuming {ticker_symbol} from checkpoint (next: {next_nodes})...")
+            else:
+                # No checkpoint found — start fresh
+                inputs = fresh_inputs
+                progress_text_container.write(f"🆕 No checkpoint for {ticker_symbol} — starting fresh...")
+        except Exception:
+            inputs = fresh_inputs
+    else:
+        inputs = fresh_inputs
+    
     final_state_result = {}
     
-    # --- MODE SELECTION LOGIC ---
+    # --- MODE SELECTION: Set up UI placeholders ---
     if workflow_mode == "Quantitative Deep-Dive":
-        target_graph = graphs.quant_only_graph
         placeholders = {
             "screener_for_quant": status_container.empty(),
             "isolated_quant": status_container.empty(),
@@ -79,7 +202,6 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
         placeholders["screener_for_quant"].markdown("⏳ **Downloading Excel Data...**")
 
     elif workflow_mode == "Qualitative Deep-Dive":
-        target_graph = graphs.qualitative_only_graph
         placeholders = {
             "screener_for_qual": status_container.empty(),
             "strategy_prereq": status_container.empty(),
@@ -90,7 +212,6 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
 
         
     elif workflow_mode == "Strategy Deep Dive":
-        target_graph = graphs.strategy_only_graph
         placeholders = {
             "screener_for_strategy": status_container.empty(),
             "isolated_strategy": status_container.empty(),
@@ -98,7 +219,6 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
         placeholders["screener_for_strategy"].markdown("⏳ **Searching for Investor Presentation...**")
 
     elif workflow_mode == "Valuation & Governance Deep-Dive":
-        target_graph = graphs.valuation_only_graph
         placeholders = {
             "screener_for_valuation": status_container.empty(),
             "isolated_valuation": status_container.empty(),
@@ -106,7 +226,6 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
         placeholders["screener_for_valuation"].markdown("⏳ **Identifying Peers & Market Data...**")
 
     elif workflow_mode == "Risk Analysis Only":
-        target_graph = graphs.risk_only_graph
         placeholders = {
             "screener_for_risk": status_container.empty(),
             "isolated_risk": status_container.empty(),
@@ -114,7 +233,6 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
         placeholders["screener_for_risk"].markdown("⏳ **Checking Credit Ratings...**")
 
     elif workflow_mode == "SEBI Violations Check (MVP)":
-        target_graph = graphs.sebi_workflow
         placeholders = {
             "screener_metadata": status_container.empty(),
             "sebi_check": status_container.empty()
@@ -122,7 +240,6 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
         placeholders["screener_metadata"].markdown("⏳ **Identifying Company...**")
 
     elif workflow_mode == "Latest Concall Analysis":
-        target_graph = graphs.earnings_graph
         placeholders = {
             "fetch_latest": status_container.empty(),
             "analyze_latest": status_container.empty()
@@ -130,7 +247,6 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
         placeholders["fetch_latest"].markdown("⏳ **Fetching Latest Transcript...**")
 
     elif workflow_mode == "QoQ Concall Analysis":
-        target_graph = graphs.strategy_shift_graph
         placeholders = {
             "fetch_both": status_container.empty(),
             "analyze_both": status_container.empty(),
@@ -139,7 +255,6 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
         placeholders["fetch_both"].markdown("⏳ **Fetching History...**")
 
     elif workflow_mode == "Scuttlebutt Research":
-        target_graph = graphs.scuttlebutt_graph
         placeholders = {
             "fetch_data": status_container.empty(),
             "strategy_analysis": status_container.empty(),
@@ -149,7 +264,6 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
         placeholders["fetch_data"].markdown("⏳ **Downloading Financial Data...**")
 
     else: # Default: Full Workflow
-        target_graph = graphs.app_graph
         placeholders = {
             "fetch_data": status_container.empty(),
             "quant": status_container.empty(),
@@ -158,11 +272,74 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
             "qual": status_container.empty(),
             "valuation": status_container.empty(),
             "synthesis": status_container.empty(),
+            "pdf_report": status_container.empty(),
         }
         placeholders["fetch_data"].markdown("⏳ **Downloading Financial Data...**")
 
+    # --- Mark completed steps when resuming ---
+    if resume_next_node:
+        # Map: (graph node name, placeholder key, display label) in execution order
+        node_to_placeholder = {
+            "Full Workflow (PDF Report)": [
+                ("fetch_data", "fetch_data", "Data Download"),
+                ("quantitative_analysis", "quant", "Quantitative Analysis"),
+                ("strategy_analysis", "strategy", "Strategy Analysis"),
+                ("risk_analysis", "risk", "Risk Analysis"),
+                ("qualitative_analysis", "qual", "Qualitative Analysis"),
+                ("valuation_analysis", "valuation", "Valuation Analysis"),
+                ("synthesis", "synthesis", "Synthesis"),
+                ("generate_report", "pdf_report", "PDF Report"),
+            ],
+            "Quantitative Deep-Dive": [
+                ("screener_for_quant", "screener_for_quant", "Excel Data Download"),
+                ("isolated_quant", "isolated_quant", "Quantitative Analysis"),
+            ],
+            "Qualitative Deep-Dive": [
+                ("screener_for_qual", "screener_for_qual", "Transcript & Docs Fetch"),
+                ("strategy_prereq", "strategy_prereq", "Strategy Prereq"),
+                ("risk_prereq", "risk_prereq", "Risk Prereq"),
+                ("isolated_qual", "isolated_qual", "Qualitative Analysis"),
+            ],
+            "Strategy Deep Dive": [
+                ("screener_for_strategy", "screener_for_strategy", "Investor Presentation Fetch"),
+                ("isolated_strategy", "isolated_strategy", "Strategy Analysis"),
+            ],
+            "Valuation & Governance Deep-Dive": [
+                ("screener_for_valuation", "screener_for_valuation", "Peers & Market Data"),
+                ("isolated_valuation", "isolated_valuation", "Valuation Analysis"),
+            ],
+            "Risk Analysis Only": [
+                ("screener_for_risk", "screener_for_risk", "Credit Ratings Fetch"),
+                ("isolated_risk", "isolated_risk", "Risk Analysis"),
+            ],
+            "SEBI Violations Check (MVP)": [
+                ("screener_metadata", "screener_metadata", "Company Identification"),
+                ("sebi_check", "sebi_check", "SEBI Check"),
+            ],
+            "Latest Concall Analysis": [
+                ("fetch_latest", "fetch_latest", "Transcript Fetch"),
+                ("analyze_latest", "analyze_latest", "Transcript Analysis"),
+            ],
+            "QoQ Concall Analysis": [
+                ("fetch_both", "fetch_both", "History Fetch"),
+                ("analyze_both", "analyze_both", "Analysis"),
+                ("compare_quarters", "compare_quarters", "Quarter Comparison"),
+            ],
+            "Scuttlebutt Research": [
+                ("fetch_data", "fetch_data", "Financial Data Download"),
+                ("strategy_analysis", "strategy_analysis", "Strategy Analysis"),
+                ("risk_analysis", "risk_analysis", "Risk Analysis"),
+                ("scuttlebutt_analysis", "scuttlebutt_analysis", "Scuttlebutt Analysis"),
+            ],
+        }
+        for graph_node, placeholder_key, label in node_to_placeholder.get(workflow_mode, []):
+            if graph_node == resume_next_node:
+                break  # This node and beyond are pending
+            if placeholder_key in placeholders:
+                placeholders[placeholder_key].markdown(f"✅ **{label} — Restored from checkpoint**")
+
     # --- EXECUTION ---
-    for event in target_graph.stream(inputs):
+    for event in target_graph.stream(inputs, stream_config):
         for node_name, node_output in event.items():
             if node_output:
                 final_state_result.update(node_output)
@@ -296,7 +473,19 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                      placeholders["synthesis"].markdown("⏳ **Generating Final Summary...**")
                 elif node_name == "synthesis":
                      placeholders["synthesis"].markdown("✅ **Summary Generated**")
+                     placeholders["pdf_report"].markdown("⏳ **Generating PDF...**")
+                elif node_name == "generate_report":
+                     placeholders["pdf_report"].markdown("✅ **PDF Report Ready**")
 
+    # If resuming, load the FULL state from checkpoint (stream only yields new events)
+    if resume_mode and checkpointer:
+        try:
+            full_state = target_graph.get_state(stream_config)
+            if full_state and full_state.values:
+                final_state_result = {**full_state.values, **final_state_result}
+        except Exception:
+            pass  # Fall back to whatever we collected from stream
+    
     final_state_result['ticker'] = ticker_symbol
     final_state_result['workflow_mode'] = workflow_mode
     return final_state_result
@@ -345,6 +534,9 @@ data_type_choice = st.sidebar.radio("Data Type", ["Standalone", "Consolidated"])
 # CLEANUP CONTROLS
 st.sidebar.markdown("---")
 append_mode = st.sidebar.checkbox("Append to existing results", value=False, help="If unchecked, starting a new run wipes previous data.")
+resume_mode = st.sidebar.checkbox("🔄 Resume from checkpoint", value=False, 
+    help="Resume a previously interrupted run from its last completed step. Uses the same ticker + workflow to find the checkpoint.",
+    disabled=(checkpointer is None))
 
 if st.sidebar.button("🗑️ Clear Results"):
     st.session_state.analysis_results = {}
@@ -375,7 +567,7 @@ if st.sidebar.button("🚀 Run Analysis", type="primary"):
                     progress_text = st.empty()
                     
                     # Pass workflow_mode to runner
-                    result_state = run_analysis_for_ticker(ticker, is_consolidated, status, progress_text, workflow_mode)
+                    result_state = run_analysis_for_ticker(ticker, is_consolidated, status, progress_text, workflow_mode, resume_mode)
                     
                     # 3. INCREMENTAL COMMIT (Save immediately)
                     st.session_state.analysis_results[ticker] = result_state
@@ -389,6 +581,14 @@ if st.sidebar.button("🚀 Run Analysis", type="primary"):
             
             progress_bar.progress((i + 1) / total_tickers)
 
+        # CLEANUP: Remove checkpoint data only for SUCCESSFUL runs
+        for ticker in tickers_to_process:
+            res = st.session_state.analysis_results.get(ticker, {})
+            # If the result suggests failure (or wasn't generated), SKIP cleanup so we can debug/resume
+            if "Analysis Failed" in str(res.get("final_report", "")) or not res:
+                continue
+            cleanup_checkpoint(ticker, workflow_mode)
+        
         st.success("All requested analyses completed!")
         st.rerun()
 

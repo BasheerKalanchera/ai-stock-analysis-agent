@@ -6,6 +6,8 @@ python-dotenv
 langchain
 langchain-core
 langgraph
+langgraph-checkpoint-postgres
+psycopg[binary,pool]
 
 # Google Generative AI for LLM access
 google-generativeai

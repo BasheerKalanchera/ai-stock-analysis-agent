@@ -158,3 +158,28 @@ qual_workflow_def.add_edge("risk_prereq", "isolated_qual")
 qual_workflow_def.add_edge("isolated_qual", END)
 
 qualitative_only_graph = qual_workflow_def.compile()
+
+
+# ==============================================================================
+# CHECKPOINTER SUPPORT
+# ==============================================================================
+def recompile_with_checkpointer(checkpointer):
+    """Recompile all workflow graphs with a PostgreSQL checkpointer.
+    
+    Reassigns module-level graph variables so existing references
+    (e.g., graphs.app_graph) work without any changes.
+    """
+    global app_graph, risk_only_graph, sebi_workflow, earnings_graph
+    global strategy_shift_graph, scuttlebutt_graph, quant_only_graph
+    global valuation_only_graph, strategy_only_graph, qualitative_only_graph
+
+    app_graph = full_workflow.compile(checkpointer=checkpointer)
+    risk_only_graph = risk_workflow.compile(checkpointer=checkpointer)
+    sebi_workflow = sebi_workflow_def.compile(checkpointer=checkpointer)
+    earnings_graph = earnings_workflow_def.compile(checkpointer=checkpointer)
+    strategy_shift_graph = strategy_shift_workflow_def.compile(checkpointer=checkpointer)
+    scuttlebutt_graph = scuttlebutt_workflow_def.compile(checkpointer=checkpointer)
+    quant_only_graph = quant_workflow_def.compile(checkpointer=checkpointer)
+    valuation_only_graph = val_workflow_def.compile(checkpointer=checkpointer)
+    strategy_only_graph = strat_workflow_def.compile(checkpointer=checkpointer)
+    qualitative_only_graph = qual_workflow_def.compile(checkpointer=checkpointer)

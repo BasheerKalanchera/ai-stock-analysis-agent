@@ -209,7 +209,7 @@ def synthesis_node(state: StockAnalysisState):
 
 def generate_report_node(state: StockAnalysisState):
     pdf_buffer = io.BytesIO()
-    create_pdf_report(
+    success = create_pdf_report(
         ticker=state['ticker'],
         company_name=state.get('company_name'),
         quant_results=state.get('quant_results_structured', []),
@@ -220,6 +220,10 @@ def generate_report_node(state: StockAnalysisState):
         final_report=state.get('final_report', "Report could not be fully generated."),
         file_path=pdf_buffer
     )
+    
+    if not success:
+        return {"final_report": state.get('final_report', "") + "\n\n❌ [ERROR: PDF Report Generation Failed. Check logs for details.]"}
+
     pdf_buffer.seek(0)
     return {"pdf_report_bytes": pdf_buffer.getvalue()}
 

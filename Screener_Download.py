@@ -139,8 +139,25 @@ def download_financial_data(
 
         wait = WebDriverWait(driver, 20)
 
-        # 1. LOGIN
-        driver.get("https://www.screener.in/login/")
+        # 1. LOGIN (with retry if Chrome window crashes on startup)
+        max_driver_retries = 2
+        for attempt in range(max_driver_retries):
+            try:
+                driver.get("https://www.screener.in/login/")
+                break  # Success — proceed
+            except Exception as nav_e:
+                if attempt < max_driver_retries - 1:
+                    logger.warning(f"Chrome window crashed on startup (attempt {attempt+1}): {nav_e}. Retrying with fresh driver...")
+                    try: driver.quit()
+                    except: pass
+                    time.sleep(2)
+                    options = get_chrome_options()
+                    driver = uc.Chrome(options=options, use_subprocess=True, version_main=target_version)
+                    driver.execute_cdp_cmd("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": temp_download_dir})
+                    wait = WebDriverWait(driver, 20)
+                else:
+                    raise nav_e
+
         wait.until(EC.visibility_of_element_located((By.ID, "id_username"))).send_keys(email)
         wait.until(EC.visibility_of_element_located((By.ID, "id_password"))).send_keys(password)
         driver.find_element(By.XPATH, "//button[@type='submit']").click()
@@ -180,41 +197,81 @@ def download_financial_data(
 
             # --- EXCEL ---
             if need_excel:
-               # ... (Original Excel logic) ...
-               pass 
-            # (Rest of the function continues as is for full download logic)
-
-            if need_excel:
-                logger.info("Downloading Excel...")
+                logger.info("Downloading Excel with validation...")
                 files_before = os.listdir(temp_download_dir)
-                
-                def click_excel_button(d):
+                excel_downloaded = False
+
+                for attempt in range(3):
                     try:
-                        d.find_element(By.XPATH, "//button[.//span[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'export to excel')]]").click()
-                        return True
-                    except:
+                        # 1. Attempt Click (Consolidated or Default)
+                        click_success = False
                         try:
-                            excel_link = d.find_element(By.XPATH, "//a[contains(text(), 'Export to Excel')]").get_attribute('href')
-                            d.get(excel_link)
-                            return True
-                        except: return False
+                            driver.find_element(By.XPATH, "//button[.//span[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'export to excel')]]").click()
+                            click_success = True
+                        except:
+                            try:
+                                excel_link = driver.find_element(By.XPATH, "//a[contains(text(), 'Export to Excel')]").get_attribute('href')
+                                driver.get(excel_link)
+                                click_success = True
+                            except: pass
+                        
+                        # 2. Fallback to Standalone if Consolidated failed to click
+                        if not click_success and is_consolidated:
+                            logger.warning(f"   ⚠️ Consolidated Excel button missing (Attempt {attempt+1}). Switching to Standalone...")
+                            try:
+                                driver.get(f"https://www.screener.in/company/{ticker}/")
+                                wait.until(EC.presence_of_element_located((By.ID, "top-ratios")))
+                                # Try clicking again on Standalone page
+                                try:
+                                    driver.find_element(By.XPATH, "//button[.//span[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'export to excel')]]").click()
+                                    click_success = True
+                                except:
+                                    excel_link = driver.find_element(By.XPATH, "//a[contains(text(), 'Export to Excel')]").get_attribute('href')
+                                    driver.get(excel_link)
+                                    click_success = True
+                            except Exception as e: 
+                                logger.error(f"   ❌ Fallback navigation failed: {e}")
 
-                success = click_excel_button(driver)
+                        # 3. Validate Download
+                        if click_success:
+                            new_filename = wait_for_new_file(temp_download_dir, files_before, timeout=15)
+                            if new_filename:
+                                full_path = os.path.join(temp_download_dir, new_filename)
+                                
+                                # Check Validity (Magic Bytes for ZIP/Excel)
+                                is_valid = False
+                                with open(full_path, 'rb') as f:
+                                    header = f.read(4)
+                                    # PK.. = Zip/XLSX, D0CF11E0 = Legacy XLS
+                                    if header.startswith(b'PK') or header.startswith(b'\xd0\xcf\x11\xe0'):
+                                        is_valid = True
+                                
+                                if is_valid:
+                                    with open(full_path, 'rb') as f:
+                                        file_buffers['excel'] = io.BytesIO(f.read())
+                                    logger.info(f"✅ Excel Downloaded & Validated: {new_filename}")
+                                    excel_downloaded = True
+                                    break # Success!
+                                else:
+                                    logger.warning(f"❌ Invalid file detected (HTML/Corrupt) in {new_filename}. Deleting and retrying...")
+                                    try: os.remove(full_path)
+                                    except: pass
+                                    # Refresh page for retry
+                                    driver.refresh()
+                                    wait.until(EC.presence_of_element_located((By.ID, "top-ratios")))
+                            else:
+                                logger.warning(f"❌ No file appeared (Attempt {attempt+1}).")
+                        
+                        else:
+                            logger.warning(f"❌ Failed to click Excel button (Attempt {attempt+1}).")
 
-                if not success and is_consolidated:
-                    logger.warning("   ⚠️ Consolidated Excel not found/clickable. Falling back to Standalone...")
-                    try:
-                        driver.get(f"https://www.screener.in/company/{ticker}/")
-                        wait.until(EC.presence_of_element_located((By.ID, "top-ratios")))
-                        if click_excel_button(driver): logger.info("   ✅ Standalone Excel click successful.")
-                    except Exception as e: logger.error(f"   ❌ Fallback navigation failed: {e}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Error during Excel download attempt {attempt+1}: {e}")
+                    
+                    time.sleep(2) # Wait before retry
 
-                new_filename = wait_for_new_file(temp_download_dir, files_before)
-                if new_filename:
-                    with open(os.path.join(temp_download_dir, new_filename), 'rb') as f:
-                        file_buffers['excel'] = io.BytesIO(f.read())
-                    logger.info(f"✅ Excel Downloaded: {new_filename}")
-                else: logger.warning("❌ Excel file did not appear in download folder.")
+                if not excel_downloaded:
+                    logger.error("❌ Failed to download valid Excel after 3 attempts.")
             else:
                 logger.info("⏭️ Skipped Excel.")
 
