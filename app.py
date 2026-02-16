@@ -129,6 +129,8 @@ def cleanup_checkpoint(ticker_symbol, workflow_mode):
     thread_id = f"{ticker_symbol}-{workflow_mode.replace(' ', '_').replace('(', '').replace(')', '')}"
     try:
         with checkpointer.conn.connection() as conn:
+            # Delete blobs first (if foreign keys exist, though usually loosely coupled in LangGraph)
+            conn.execute("DELETE FROM checkpoint_blobs WHERE thread_id = %s", (thread_id,))
             conn.execute("DELETE FROM checkpoint_writes WHERE thread_id = %s", (thread_id,))
             conn.execute("DELETE FROM checkpoints WHERE thread_id = %s", (thread_id,))
     except Exception:
