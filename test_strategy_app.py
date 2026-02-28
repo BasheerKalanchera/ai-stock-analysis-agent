@@ -23,7 +23,7 @@ st.sidebar.header("Configuration")
 default_email = os.getenv("SCREENER_EMAIL", "")
 default_pass = os.getenv("SCREENER_PASSWORD", "")
 default_key = os.getenv("GOOGLE_API_KEY", "")
-default_model = os.getenv("LITE_MODEL_NAME", "gemini-2.0-flash-lite")
+default_model = os.getenv("LITE_MODEL_NAME", "gemini-2.5-flash-lite")
 
 screener_email = st.sidebar.text_input("Screener Email", value=default_email)
 screener_pass = st.sidebar.text_input("Screener Password", value=default_pass, type="password")

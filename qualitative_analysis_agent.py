@@ -44,12 +44,90 @@ def _log_rate_limit(analysis_type: str, attempt: int, wait_time: float, is_gener
 def _chunk_text(text: str, chunk_size: int = 25000) -> list[str]:
     return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
 
-def _extract_text_from_pdf_buffer(pdf_buffer: io.BytesIO | None) -> str:
+
+def _extract_text_from_pdf_buffer(pdf_buffer: io.BytesIO | None, agent_config: dict = None) -> str:
     logger.info("Starting PDF text extraction...")
     if not pdf_buffer: return ""
     try:
+        all_page_texts = []
+        image_pages_needing_ocr = []
+
         with fitz.open(stream=pdf_buffer.getvalue(), filetype="pdf") as doc:
-            full_text = "".join(page.get_text() for page in doc)
+            for i, page in enumerate(doc):
+                text = page.get_text().strip()
+                if text:
+                    all_page_texts.append((i, text))
+                elif page.get_images():  # Image-only page (scanned)
+                    # Render to PNG bytes for Gemini OCR
+                    pix = page.get_pixmap(dpi=200)
+                    image_pages_needing_ocr.append((i, pix.tobytes("png")))
+                    all_page_texts.append((i, None))  # placeholder
+
+        # --- GEMINI VISION OCR FALLBACK: SINGLE BATCHED CALL for all image-only pages ---
+        if image_pages_needing_ocr:
+            logger.info(f"Found {len(image_pages_needing_ocr)} image-only page(s). Batching into a single Gemini Vision call...")
+            api_key = (agent_config or {}).get("GOOGLE_API_KEY")
+            ocr_model_name = (agent_config or {}).get("IMAGE_MODEL_NAME", "gemini-2.5-flash")
+            if api_key:
+                try:
+                    import PIL.Image
+                    import io as _io
+                    genai.configure(api_key=api_key)
+                    vision_model = genai.GenerativeModel(ocr_model_name)
+                    logger.info(f"Using vision model: {ocr_model_name} for {len(image_pages_needing_ocr)} page(s) in 1 API call.")
+
+                    # Build the prompt + all page images in one list
+                    PAGE_SEP = "--- PAGE {n} ---"
+                    prompt_text = (
+                        f"This PDF has {len(image_pages_needing_ocr)} scanned page(s). "
+                        "Extract ALL text from each page IN ORDER. "
+                        f"Separate each page's text with the exact delimiter '{PAGE_SEP.format(n='<N>')}' "
+                        "where <N> is the page number starting from 1. "
+                        "Return ONLY the raw text and delimiters. No commentary."
+                    )
+                    content_parts = [prompt_text]
+                    for _, png_bytes in image_pages_needing_ocr:
+                        content_parts.append(PIL.Image.open(_io.BytesIO(png_bytes)))
+
+                    response = vision_model.generate_content(content_parts)
+                    ocr_full_text = response.text.strip()
+                    logger.info(f"  ✅ Batch OCR complete: {len(ocr_full_text)} total chars returned.")
+
+                    # Split response back into per-page chunks using the delimiter
+                    import re as _re
+                    page_chunks = _re.split(r"---\s*PAGE\s*\d+\s*---", ocr_full_text)
+                    # Remove any leading empty chunk before the first delimiter
+                    page_chunks = [c.strip() for c in page_chunks if c.strip()]
+
+                    logger.info(f"  ✅ Batch OCR complete: {len(ocr_full_text)} total chars, {len(page_chunks)} chunk(s) parsed for {len(image_pages_needing_ocr)} page(s).")
+                    for chunk_i, (page_idx, _) in enumerate(image_pages_needing_ocr):
+                        if chunk_i < len(page_chunks):
+                            all_page_texts[page_idx] = (page_idx, page_chunks[chunk_i])
+                            logger.info(f"  ✅ OCR Page {page_idx+1}: {len(page_chunks[chunk_i])} chars.")
+                        else:
+                            # Model dropped a delimiter: append leftover chunk to the last mapped page
+                            last_idx = image_pages_needing_ocr[chunk_i - 1][0]
+                            existing_text = all_page_texts[last_idx][1]
+                            all_page_texts[last_idx] = (last_idx, existing_text + "\n" + page_chunks[chunk_i])
+                            logger.warning(f"  ⚠️ No delimiter for page {page_idx+1} — appended to page {last_idx+1}.")
+
+                except google_exceptions.ResourceExhausted as rate_e:
+                    logger.error(
+                        f"  🚨 RATE LIMIT HIT on '{ocr_model_name}' during batch OCR. "
+                        f"Set IMAGE_MODEL_NAME in your .env to switch to a different model. Error: {rate_e}"
+                    )
+                except Exception as ocr_e:
+                    if "429" in str(ocr_e) or "quota" in str(ocr_e).lower():
+                        logger.error(
+                            f"  🚨 RATE LIMIT (429) on '{ocr_model_name}' during batch OCR. "
+                            f"Set IMAGE_MODEL_NAME in your .env to switch to a different model. Error: {ocr_e}"
+                        )
+                    else:
+                        logger.warning(f"  ⚠️ Batch OCR failed: {ocr_e}")
+            else:
+                logger.warning("Gemini Vision OCR skipped: No GOOGLE_API_KEY in agent_config.")
+
+        full_text = "\n\n".join(t for _, t in sorted(all_page_texts) if t)
         logger.info(f"Finished PDF text extraction. ({len(full_text)} chars)")
         return full_text
     except Exception as e:
@@ -504,7 +582,7 @@ def run_qualitative_analysis(
     lat_res = None
     try:
         if latest_transcript_buffer:
-            text = _extract_text_from_pdf_buffer(latest_transcript_buffer)
+            text = _extract_text_from_pdf_buffer(latest_transcript_buffer, agent_config)
             if text:
                 lat_res = _analyze_positives_and_concerns(text, agent_config)
                 results["positives_and_concerns"] = lat_res
@@ -522,7 +600,7 @@ def run_qualitative_analysis(
     prev_res = None
     try:
         if previous_transcript_buffer:
-            text = _extract_text_from_pdf_buffer(previous_transcript_buffer)
+            text = _extract_text_from_pdf_buffer(previous_transcript_buffer, agent_config)
             if text:
                 prev_res = _analyze_positives_and_concerns(text, agent_config)
                 logger.info("✅ Step 3 (Previous Earnings) Complete.")
@@ -566,7 +644,7 @@ def run_isolated_sebi_check(company_name, agent_config):
     return _sebi_sync(company_name, agent_config)
 
 def run_earnings_analysis_standalone(company_name, transcript_buffer, config, quarter_label="Generic"):
-    text = _extract_text_from_pdf_buffer(transcript_buffer)
+    text = _extract_text_from_pdf_buffer(transcript_buffer, config)
     if not text: return "Failed to extract text."
     return _analyze_positives_and_concerns(text, config)
 

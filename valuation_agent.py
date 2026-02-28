@@ -115,7 +115,7 @@ def run_valuation_analysis(ticker: str, company_name: str, peer_df: pd.DataFrame
         return {"content": "Valuation analysis skipped: No peer data available."}
 
     api_key = agent_config.get("GOOGLE_API_KEY")
-    model_name = agent_config.get("HEAVY_MODEL_NAME", "gemini-2.0-flash") 
+    model_name = agent_config.get("HEAVY_MODEL_NAME", "gemini-2.5-flash") 
     
     if not api_key:
         return {"content": "ERROR: Google API Key missing for Valuation Agent."}

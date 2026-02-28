@@ -21,50 +21,89 @@ load_dotenv()
 @st.cache_resource
 def setup_checkpointer():
     """Initialize PostgreSQL checkpointer for crash recovery.
-    Returns None if DATABASE_URL is not configured (app works without it)."""
+    Runs entirely in a background thread with a 10-second hard timeout
+    so the Streamlit UI is NEVER blocked by a cold-starting Neon DB.
+    Returns None if DATABASE_URL is not configured or DB is unreachable."""
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
     db_url = os.getenv("DATABASE_URL")
     if not db_url:
         try:
             db_url = st.secrets.get("DATABASE_URL")
         except (FileNotFoundError, KeyError, st.errors.StreamlitAPIException):
             pass
-    
+
     if not db_url:
         return None
-    
-    try:
+
+    def _do_setup(url):
+        """All blocking DB work lives here — runs off the main thread."""
+        import socket, urllib.parse
         import psycopg
         from psycopg_pool import ConnectionPool
         from langgraph.checkpoint.postgres import PostgresSaver
         from checkpointer_serde import StockAnalysisSerializer
-        
-        # Run one-time table/index creation with autocommit (required by Postgres)
-        with psycopg.connect(db_url, autocommit=True) as setup_conn:
+
+        # ── Fix: force IPv4 to skip the 30-second Windows IPv6→IPv4 fallback ──
+        # Windows tries IPv6 first; when that fails it waits ~30s before IPv4.
+        # We pre-resolve the hostname to an IPv4 address and pass it via
+        # `hostaddr` so psycopg connects directly. `host` is kept for SSL SNI.
+        parsed = urllib.parse.urlparse(url)
+        neon_host = parsed.hostname
+        try:
+            ipv4 = socket.getaddrinfo(neon_host, None, socket.AF_INET)[0][4][0]
+            # Append hostaddr to the connection string
+            sep = "&" if "?" in url else "?"
+            url_ipv4 = url + sep + f"hostaddr={ipv4}"
+        except Exception:
+            url_ipv4 = url  # fall back to original if resolution fails
+
+        with psycopg.connect(
+            url_ipv4,
+            autocommit=True,
+            connect_timeout=10,
+        ) as setup_conn:
             PostgresSaver(setup_conn).setup()
-        
-        # Create connection pool for runtime checkpointing (min_size=0 + check_connection + keepalives)
+
         pool = ConnectionPool(
-            conninfo=db_url, 
-            min_size=0, 
+            conninfo=url_ipv4,
+            min_size=0,
             max_size=3,
             kwargs={
-                'autocommit': True,
-                'keepalives': 1,
-                'keepalives_idle': 30,
-                'keepalives_interval': 10,
-                'keepalives_count': 5
-            }, # checkpointer handles transactions internally
-            check=ConnectionPool.check_connection # Verify connection before use!
+                "autocommit": True,
+                "keepalives": 1,
+                "keepalives_idle": 30,
+                "keepalives_interval": 10,
+                "keepalives_count": 5,
+                "connect_timeout": 10,
+            },
+            open=False,
+            check=ConnectionPool.check_connection,
         )
+        pool.open(wait=True, timeout=10)
+
         serde = StockAnalysisSerializer()
-        checkpointer = PostgresSaver(conn=pool, serde=serde)
-        
-        # Recompile all graphs with the checkpointer
-        graphs.recompile_with_checkpointer(checkpointer)
-        return checkpointer
-    except Exception as e:
-        st.sidebar.warning(f"⚠️ Checkpointer disabled: {e}")
-        return None
+        cp = PostgresSaver(conn=pool, serde=serde)
+        graphs.recompile_with_checkpointer(cp)
+        return cp
+
+    # Hard 40-second wall-clock cap (was 25s — bumped after diagnostic showed
+    # 30s TCP + 0.7s SQL + 2.75s graph recompile = ~34s on a warm DB).
+    # The IPv4 hostaddr fix above should cut TCP from 30s → <1s, making this
+    # budget very comfortable. Kept at 40s as a safety margin.
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        future = ex.submit(_do_setup, db_url)
+        try:
+            return future.result(timeout=40)
+        except FuturesTimeout:
+            st.sidebar.warning(
+                "⚠️ Checkpointer disabled: DB setup timed out after 25s. "
+                "Neon may be cold-starting — restart the server in ~30s to retry."
+            )
+            return None
+        except Exception as e:
+            st.sidebar.warning(f"⚠️ Checkpointer disabled: {e}")
+            return None
 
 # Initialize checkpointer (runs once, cached by Streamlit)
 checkpointer = setup_checkpointer()
@@ -87,10 +126,13 @@ agent_configs = {
     "SCREENER_EMAIL": get_secret("SCREENER_EMAIL"),
     "SCREENER_PASSWORD": get_secret("SCREENER_PASSWORD"),
     "GOOGLE_API_KEY": get_secret("GOOGLE_API_KEY"),
-    "LITE_MODEL_NAME": get_secret("LITE_MODEL_NAME", "gemini-2.0-flash-lite"),
-    "HEAVY_MODEL_NAME": get_secret("HEAVY_MODEL_NAME", "gemini-2.0-flash"),
-    "FALLBACK_REQUEST_MODEL": "gemini-2.0-flash-lite", 
-    "FALLBACK_TOKEN_MODEL": "gemini-2.0-flash",
+    "LITE_MODEL_NAME":        get_secret("LITE_MODEL_NAME", "gemini-2.5-flash-lite"),
+    "HEAVY_MODEL_NAME":       get_secret("HEAVY_MODEL_NAME", "gemini-2.5-flash"),
+    "IMAGE_MODEL_NAME":       get_secret("IMAGE_MODEL_NAME", "gemini-2.5-flash"),   # Gemini ONLY for OCR vision
+    # Fallback models: stay within Gemma family to preserve Gemini 2.5 Flash RPD=20 for OCR
+    # All Gemma models share quota (RPM=30, TPM=15K, RPD=14.4K) but smaller models use fewer tokens
+    "FALLBACK_REQUEST_MODEL": get_secret("FALLBACK_REQUEST_MODEL", "gemma-3-12b-it"),  # Lighter Gemma for RPM fallback
+    "FALLBACK_TOKEN_MODEL":   get_secret("FALLBACK_TOKEN_MODEL",   "gemma-3-4b-it"),   # Smallest Gemma for TPM fallback
     "TAVILY_API_KEY": get_secret("TAVILY_API_KEY"),
     "IS_CLOUD_ENV": is_cloud_env
 }
@@ -341,10 +383,17 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                 placeholders[placeholder_key].markdown(f"✅ **{label} — Restored from checkpoint**")
 
     # --- EXECUTION ---
-    for event in target_graph.stream(inputs, stream_config):
-        for node_name, node_output in event.items():
-            if node_output:
-                final_state_result.update(node_output)
+    def _stream_events(stream_cfg):
+        """Inner helper so we can retry without checkpointer on pool timeout."""
+        for event in target_graph.stream(inputs, stream_cfg):
+            yield event
+
+    try:
+        event_iter = _stream_events(stream_config)
+        for event in event_iter:
+            for node_name, node_output in event.items():
+                if node_output:
+                    final_state_result.update(node_output)
             
             # Update Status Indicators based on Mode
             if workflow_mode == "Risk Analysis Only":
@@ -478,6 +527,21 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                      placeholders["pdf_report"].markdown("⏳ **Generating PDF...**")
                 elif node_name == "generate_report":
                      placeholders["pdf_report"].markdown("✅ **PDF Report Ready**")
+
+    except Exception as _pool_exc:
+        # If failure is psycopg_pool PoolTimeout (Neon cold-start hitting the first ticker),
+        # retry without checkpoint config so the ticker isn't silently skipped.
+        _exc_type = type(_pool_exc).__name__
+        if "PoolTimeout" in _exc_type or "pool" in str(_pool_exc).lower():
+            progress_text_container.write(
+                f"⚠️ DB checkpoint timed out for {ticker_symbol} — retrying without checkpoint..."
+            )
+            for event in target_graph.stream(inputs, {}):
+                for node_name, node_output in event.items():
+                    if node_output:
+                        final_state_result.update(node_output)
+        else:
+            raise  # Re-raise unexpected errors
 
     # If resuming, load the FULL state from checkpoint (stream only yields new events)
     if resume_mode and checkpointer:

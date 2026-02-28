@@ -39,10 +39,10 @@ def execute_with_fallback(func, log_accumulator, agent_name, *args, **kwargs):
         error_str = str(e).lower()
         if "429" in error_str or "quota" in error_str or "resource exhausted" in error_str:
             if "token" in error_str:
-                fallback_model = config.get('FALLBACK_TOKEN_MODEL', 'gemini-2.0-flash')
+                fallback_model = config.get('FALLBACK_TOKEN_MODEL', 'gemini-2.5-flash')
                 reason_msg = "Token Limit (TPM)"
             else:
-                fallback_model = config.get('FALLBACK_REQUEST_MODEL', 'gemini-2.0-flash-lite')
+                fallback_model = config.get('FALLBACK_REQUEST_MODEL', 'gemini-2.5-flash-lite')
                 reason_msg = "Request Limit (RPD/RPM)"
 
             backup_config = copy.deepcopy(config)
