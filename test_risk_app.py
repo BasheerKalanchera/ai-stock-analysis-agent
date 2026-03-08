@@ -1,3 +1,18 @@
+"""
+test_risk_app.py
+================
+Streamlit test harness that isolates the Download → Risk Agent workflow.
+Skips valuation models and full report generation to allow rapid iteration
+on the Risk Agent prompt. Only downloads Credit Rating reports.
+
+CHANGE LOG
+----------
+[2026-03-04] Optimize for Playwright + risk-only downloads
+  - Updated status message from "Stealth Driver" to "Playwright browser".
+  - Added explicit download flags (need_excel=False, need_transcripts=False,
+    need_ppt=False, need_peers=False) to skip unnecessary downloads.
+  - Only downloads Credit Rating report for faster risk-only testing.
+"""
 import streamlit as st
 import os
 import logging
@@ -46,11 +61,17 @@ if st.button("Run Risk Analysis"):
 
         # Step 1: Download
         with st.status("Running Screener Downloader...", expanded=True) as status:
-            st.write("Initializing Stealth Driver...")
+            st.write("Launching Playwright browser...")
             
-            # Run the updated downloader
-            # Note: We don't need consolidated for risk usually, default False is fine
-            company, file_buffers, _ = download_financial_data(ticker, config)
+            # Only download credit rating report for risk analysis
+            company, file_buffers, _ = download_financial_data(
+                ticker, config,
+                need_excel=False,
+                need_transcripts=False,
+                need_ppt=False,
+                need_peers=False,
+                need_credit_report=True
+            )
             
             if 'credit_rating_doc' in file_buffers:
                 doc_type = file_buffers['credit_rating_type']

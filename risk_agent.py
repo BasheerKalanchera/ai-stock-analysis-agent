@@ -1,3 +1,19 @@
+"""
+risk_agent.py
+=============
+Analyzes credit rating documents (CRISIL, ICRA, CARE, India Ratings, etc.)
+to produce a structured Risk Profile using Google Gemini. Extracts text from
+PDF or HTML credit reports, validates PDF headers, and generates a markdown
+report covering credit rating, strengths, risks, liquidity, and debt profile.
+
+CHANGE LOG
+----------
+[2026-03-04] Add credit rating date transparency
+  - Extract credit_rating_date from file_buffers dictionary.
+  - Inject the report date into the Gemini prompt's "Company Overview" header
+    so the LLM explicitly states the age of the credit report being analyzed.
+  - Prevents analysts from unknowingly reviewing outdated fallback reports.
+"""
 import os
 import io
 import logging
@@ -105,6 +121,7 @@ def risk_analyst_agent(file_buffers, api_key, model_name):
 
     doc = file_buffers['credit_rating_doc']
     doc_type = file_buffers.get('credit_rating_type', 'html')
+    doc_date = file_buffers.get('credit_rating_date', 'Unknown Date')
     
     raw_text = extract_text_from_buffer(doc, doc_type)
     
@@ -131,8 +148,8 @@ def risk_analyst_agent(file_buffers, api_key, model_name):
         Produce a strict Markdown report summarizing the credit health, stripping away marketing glamour to focus on raw solvency.
         
         Format:
-        ### Company Overview
-        [A short, 2-3 sentence paragraph summarizing what the company does, its industry, and key products/services based on the report.]
+        ### Company Overview ({doc_date})
+        [A short, 2-3 sentence paragraph summarizing what the company does, its industry, and key products/services based on the report. Explicitly state that this analysis is based on the report dated: {doc_date}.]
 
         ### Credit Summary
         [A short, 3-4 sentence paragraph summarizing the findings the sections below ]

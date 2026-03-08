@@ -13,8 +13,7 @@ psycopg[binary,pool]
 google-generativeai
 
 # Web scraping and browser automation
-selenium
-undetected-chromedriver
+playwright
 
 # Data handling and Excel parsing
 pandas

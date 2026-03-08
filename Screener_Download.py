@@ -1,3 +1,38 @@
+"""
+Screener_Download.py
+====================
+Downloads financial data from screener.in for a given stock ticker using
+Playwright browser automation. Supports downloading Excel financials,
+Peer comparison tables, Investor Presentations (PPT), Credit Rating reports
+(CRISIL, ICRA, CARE, etc.), and Concall Transcripts. Transfers browser
+cookies to a requests.Session for direct PDF downloads where possible.
+
+CHANGE LOG
+----------
+[2026-03-04] Fix ICRA credit rating downloads & transcript selectors
+  - Refactored credit ratings to loop through ALL rating links instead of
+    only checking the first one. If a link fails, it moves to the next.
+  - Added "NO FILE TO VIEW" detection for broken ICRA report pages.
+  - Extracted credit rating publication date from Screener HTML link text
+    and stored it in file_buffers['credit_rating_date'] for the Risk Agent.
+  - Fixed transcript CSS selector from brittle h3 sibling combinator to
+    '.documents.concalls a.concall-link[title="Raw Transcript"]' which
+    correctly handles deeply nested DOM structures (e.g., HCLTECH).
+
+[2026-02-28] Selenium → Playwright migration
+  - Replaced Selenium (undetected-chromedriver) with Playwright async API.
+  - Removed wait_for_new_file() polling — replaced with page.expect_download().
+  - Removed JS injection fallback for in-browser PDFs — replaced with native
+    Playwright download handling.
+  - Added public sync wrapper download_financial_data() that runs the async
+    implementation in a dedicated Thread with ProactorEventLoop (fixes
+    Streamlit's SelectorEventLoop on Windows which can't create subprocesses).
+  - Cookie transfer: browser cookies are now extracted from Playwright context
+    and injected into a requests.Session for direct PDF downloads.
+  - On Linux (Streamlit Cloud), uses system Chromium from packages.txt.
+    On Windows (local dev), uses Playwright's bundled Chromium.
+"""
+import asyncio
 import io
 import os
 import shutil
@@ -7,14 +42,10 @@ import logging
 import pandas as pd
 import requests
 import platform
-import base64 
+import base64
 
-# --- IMPORTS ---
-import undetected_chromedriver as uc
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.common.exceptions import TimeoutException, SessionNotCreatedException, StaleElementReferenceException
+# --- PLAYWRIGHT IMPORTS ---
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 # --- LOGGER ---
 logger = logging.getLogger('screener_download')
@@ -26,418 +57,386 @@ if not logger.handlers:
     logger.addHandler(handler)
 logger.propagate = False
 
-def wait_for_new_file(download_path: str, files_before: list, timeout: int = 60) -> str | None:
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        files_after = os.listdir(download_path)
-        new_files = [f for f in files_after if f not in files_before and not f.endswith(('.crdownload', '.tmp')) and not f.startswith('.')]
-        if new_files:
-            return new_files[0]
-        time.sleep(1)
-    return None
 
-def scrape_peers_data(driver) -> pd.DataFrame:
+async def scrape_peers_data(page) -> pd.DataFrame:
+    """Scrapes the Peers table from the current company page."""
     try:
         logger.info("Attempting to scrape Peers table...")
-        wait = WebDriverWait(driver, 10)
         target_id = "peers-table-placeholder"
+
         try:
-            container = wait.until(EC.presence_of_element_located((By.ID, target_id)))
-            driver.execute_script("arguments[0].scrollIntoView();", container)
-        except TimeoutException:
-            container = wait.until(EC.presence_of_element_located((By.ID, "peers")))
-            driver.execute_script("arguments[0].scrollIntoView();", container)
+            container = await page.wait_for_selector(f"#{target_id}", timeout=10000)
+        except PlaywrightTimeoutError:
+            container = await page.wait_for_selector("#peers", timeout=10000)
+
+        await container.scroll_into_view_if_needed()
 
         table_selector = f"#{target_id} table"
-        table_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, table_selector)))
-        
-        html = table_element.get_attribute('outerHTML')
-        dfs = pd.read_html(io.StringIO(html))
-        
+        try:
+            table_element = await page.wait_for_selector(table_selector, timeout=10000)
+        except PlaywrightTimeoutError:
+            # Fallback: try direct #peers table
+            table_element = await page.wait_for_selector("#peers table", timeout=5000)
+
+        html = await table_element.inner_html()
+        dfs = pd.read_html(io.StringIO(f"<table>{html}</table>"))
+
         if dfs:
             peer_df = dfs[0]
-            if "S.No." in peer_df.columns: peer_df = peer_df.drop(columns=["S.No."])
+            if "S.No." in peer_df.columns:
+                peer_df = peer_df.drop(columns=["S.No."])
             peer_df = peer_df.loc[:, ~peer_df.columns.str.contains('^Unnamed', case=False)]
             logger.info(f"✅ SUCCESS: Scraped Peer Data Table ({len(peer_df)} rows).")
             return peer_df
     except Exception as e:
         logger.warning(f"Could not scrape Peers table: {e}")
-        return pd.DataFrame()
     return pd.DataFrame()
 
-def download_financial_data(
-    ticker: str, 
-    config: dict, 
+
+async def _download_financial_data_async(
+    ticker: str,
+    config: dict,
     is_consolidated: bool = False,
-    # --- New Flags for Phase 0.5 ---
     need_excel: bool = True,
     need_transcripts: bool = True,
     need_ppt: bool = True,
     need_credit_report: bool = True,
     need_peers: bool = True,
-    # --- New Flag for SEBI MVP ---
     metadata_only: bool = False
 ) -> Tuple[Optional[str], Dict[str, Any], pd.DataFrame]:
-    
+    """
+    Internal async implementation. Uses Playwright to log into screener.in
+    and download all requested financial documents for a ticker.
+    """
     email = config["SCREENER_EMAIL"]
     password = config["SCREENER_PASSWORD"]
-    
+
     logger.info(f"Starting download for {ticker} | Metadata Only={metadata_only}...")
-    
-    temp_download_dir = os.path.join(os.getcwd(), "temp_downloads")
-    os.makedirs(temp_download_dir, exist_ok=True)
 
-    # ... (Rest of chrome options logic remains identical) ...
-    def get_chrome_options():
-        opts = uc.ChromeOptions()
-        prefs = {
-            "download.default_directory": temp_download_dir,
-            "download.prompt_for_download": False,
-            "download.directory_upgrade": True,
-            "safebrowsing.enabled": True,
-            "plugins.always_open_pdf_externally": True,
-            "pdfjs.disabled": True,
-            "plugins.plugins_list": [{"enabled": False, "name": "Chrome PDF Viewer"}],
-            "download.extensions_to_open": "applications/pdf"
-        }
-        opts.add_experimental_option("prefs", prefs)
-
-        if platform.system() == "Linux":
-            opts.binary_location = "/usr/bin/chromium"
-            opts.add_argument("--headless=new") 
-            opts.add_argument("--no-sandbox")
-            opts.add_argument("--disable-dev-shm-usage")
-            opts.add_argument("--disable-gpu")
-            opts.add_argument("--window-size=1920,1080")
-        else:
-            opts.add_argument("--window-size=1920,1080")
-            opts.add_argument("--headless=new") 
-        
-        return opts
-
-    driver = None
     company_name = None
     file_buffers = {}
     peer_data = pd.DataFrame()
 
-    try:
-        logger.info("Initializing Chrome Driver...")
-        target_version = 144  # Match Chrome version on Streamlit Cloud
+    async with async_playwright() as p:
+        # --- BROWSER LAUNCH ---
+        launch_args = [
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--window-size=1920,1080",
+        ]
+        # On Linux (Streamlit Cloud), use the system Chromium installed via packages.txt.
+        # On Windows (local), use Playwright's own downloaded Chromium.
+        executable_path = "/usr/bin/chromium" if platform.system() == "Linux" else None
+        browser = await p.chromium.launch(
+            headless=True,
+            args=launch_args,
+            executable_path=executable_path,
+        )
+
+        # Create context with download support
+        context = await browser.new_context(
+            accept_downloads=True,
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080},
+        )
+        page = await context.new_page()
 
         try:
-            options = get_chrome_options()
-            driver = uc.Chrome(options=options, use_subprocess=True, version_main=target_version)
-            driver.execute_cdp_cmd("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": temp_download_dir})
-        except Exception as e:
-            logger.warning(f"Standard uc.Chrome failed: {e}. Trying without subprocess...")
+            # --- 1. LOGIN ---
+            logger.info("Initializing browser and logging in...")
+            await page.goto("https://www.screener.in/login/", wait_until="domcontentloaded")
+            await page.wait_for_selector("#id_username", timeout=15000)
+            await page.fill("#id_username", email)
+            await page.fill("#id_password", password)
+            await page.click("button[type='submit']")
+            # Wait for redirect away from the login page (URL will no longer contain '/login/')
+            await page.wait_for_url(lambda url: "/login/" not in url, timeout=20000)
+            await page.wait_for_load_state("domcontentloaded")
+            logger.info("Login successful.")
+
+            # --- 2. NAVIGATE TO COMPANY PAGE ---
+            url = f"https://www.screener.in/company/{ticker}/{'consolidated/' if is_consolidated else ''}"
+            await page.goto(url, wait_until="domcontentloaded")
+
+            # --- BUILD REQUESTS SESSION (transfer cookies) ---
+            cookies = await context.cookies()
+            session = requests.Session()
+            session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer": url,
+                "Accept-Language": "en-US,en;q=0.9",
+            })
+            for cookie in cookies:
+                session.cookies.set(cookie['name'], cookie['value'])
+
+            # --- 3. FETCH COMPANY NAME ---
             try:
-                retry_options = get_chrome_options()
-                driver = uc.Chrome(options=retry_options, version_main=target_version)
-            except Exception as e2:
-                logger.error(f"Critical Driver Error: {e2}")
-                raise e2
-
-        wait = WebDriverWait(driver, 20)
-
-        # 1. LOGIN (with retry if Chrome window crashes on startup)
-        max_driver_retries = 2
-        for attempt in range(max_driver_retries):
-            try:
-                driver.get("https://www.screener.in/login/")
-                break  # Success — proceed
-            except Exception as nav_e:
-                if attempt < max_driver_retries - 1:
-                    logger.warning(f"Chrome window crashed on startup (attempt {attempt+1}): {nav_e}. Retrying with fresh driver...")
-                    try: driver.quit()
-                    except: pass
-                    time.sleep(2)
-                    options = get_chrome_options()
-                    driver = uc.Chrome(options=options, use_subprocess=True, version_main=target_version)
-                    driver.execute_cdp_cmd("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": temp_download_dir})
-                    wait = WebDriverWait(driver, 20)
-                else:
-                    raise nav_e
-
-        wait.until(EC.visibility_of_element_located((By.ID, "id_username"))).send_keys(email)
-        wait.until(EC.visibility_of_element_located((By.ID, "id_password"))).send_keys(password)
-        driver.find_element(By.XPATH, "//button[@type='submit']").click()
-        wait.until(EC.presence_of_element_located((By.XPATH, "//input[@placeholder='Search for a company']")))
-        logger.info("Login successful.")
-
-        # 2. NAVIGATE
-        url = f"https://www.screener.in/company/{ticker}/{'consolidated/' if is_consolidated else ''}"
-        driver.get(url)
-        
-        # --- SANITIZE USER AGENT ---
-        raw_ua = driver.execute_script("return navigator.userAgent;")
-        clean_ua = raw_ua.replace("HeadlessChrome", "Chrome") 
-        
-        session = requests.Session()
-        session.headers.update({
-            "User-Agent": clean_ua, 
-            "Referer": url,
-            "Accept-Language": "en-US,en;q=0.9",
-        })
-        for cookie in driver.get_cookies(): 
-            session.cookies.set(cookie['name'], cookie['value'])
-        # -----------------------------------
-
-        try:
-            # --- ALWAYS FETCH COMPANY NAME ---
-            wait.until(EC.presence_of_element_located((By.ID, "top-ratios")))
-            company_name = wait.until(EC.visibility_of_element_located((By.XPATH, "//h1[contains(@class, 'margin-0')]"))).text.strip()
-            logger.info(f"✅ Company Identified: {company_name}")
+                await page.wait_for_selector("#top-ratios", timeout=15000)
+                company_name_el = await page.wait_for_selector("h1.margin-0", timeout=10000)
+                company_name = (await company_name_el.inner_text()).strip()
+                logger.info(f"✅ Company Identified: {company_name}")
+            except PlaywrightTimeoutError:
+                logger.warning("Could not find company name element.")
 
             # --- SEBI MVP SHORT CIRCUIT ---
             if metadata_only:
                 logger.info("🛑 Metadata Only Mode: Skipping heavy downloads.")
-                driver.quit()
                 return company_name, {}, pd.DataFrame()
-            # ----------------------------
 
-            # --- EXCEL ---
+            # --- 4. EXCEL ---
             if need_excel:
                 logger.info("Downloading Excel with validation...")
-                files_before = os.listdir(temp_download_dir)
                 excel_downloaded = False
 
                 for attempt in range(3):
                     try:
-                        # 1. Attempt Click (Consolidated or Default)
                         click_success = False
+
+                        # Try button click first
                         try:
-                            driver.find_element(By.XPATH, "//button[.//span[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'export to excel')]]").click()
-                            click_success = True
-                        except:
-                            try:
-                                excel_link = driver.find_element(By.XPATH, "//a[contains(text(), 'Export to Excel')]").get_attribute('href')
-                                driver.get(excel_link)
+                            btn = page.locator("button:has-text('Export to Excel'), button:has-text('export to excel')")
+                            count = await btn.count()
+                            if count > 0:
+                                async with page.expect_download(timeout=20000) as download_info:
+                                    await btn.first.click()
+                                download = await download_info.value
+                                dl_path = await download.path()
+                                with open(dl_path, 'rb') as f:
+                                    excel_bytes = f.read()
                                 click_success = True
-                            except: pass
-                        
-                        # 2. Fallback to Standalone if Consolidated failed to click
-                        if not click_success and is_consolidated:
-                            logger.warning(f"   ⚠️ Consolidated Excel button missing (Attempt {attempt+1}). Switching to Standalone...")
+                            else:
+                                raise Exception("Button not found")
+                        except Exception:
+                            # Fallback: try href link
                             try:
-                                driver.get(f"https://www.screener.in/company/{ticker}/")
-                                wait.until(EC.presence_of_element_located((By.ID, "top-ratios")))
-                                # Try clicking again on Standalone page
+                                link = page.locator("a:has-text('Export to Excel')")
+                                href = await link.get_attribute('href')
+                                if href:
+                                    async with page.expect_download(timeout=20000) as download_info:
+                                        await page.goto(href)
+                                    download = await download_info.value
+                                    dl_path = await download.path()
+                                    with open(dl_path, 'rb') as f:
+                                        excel_bytes = f.read()
+                                    click_success = True
+                            except Exception:
+                                pass
+
+                        # Fallback to standalone if consolidated link missing
+                        if not click_success and is_consolidated:
+                            logger.warning(f"   ⚠️ Consolidated Excel missing (Attempt {attempt+1}). Switching to Standalone...")
+                            try:
+                                await page.goto(f"https://www.screener.in/company/{ticker}/", wait_until="domcontentloaded")
+                                await page.wait_for_selector("#top-ratios", timeout=10000)
                                 try:
-                                    driver.find_element(By.XPATH, "//button[.//span[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'export to excel')]]").click()
-                                    click_success = True
-                                except:
-                                    excel_link = driver.find_element(By.XPATH, "//a[contains(text(), 'Export to Excel')]").get_attribute('href')
-                                    driver.get(excel_link)
-                                    click_success = True
-                            except Exception as e: 
+                                    btn = page.locator("button:has-text('Export to Excel'), button:has-text('export to excel')")
+                                    if await btn.count() > 0:
+                                        async with page.expect_download(timeout=20000) as download_info:
+                                            await btn.first.click()
+                                        download = await download_info.value
+                                        dl_path = await download.path()
+                                        with open(dl_path, 'rb') as f:
+                                            excel_bytes = f.read()
+                                        click_success = True
+                                except Exception:
+                                    pass
+                            except Exception as e:
                                 logger.error(f"   ❌ Fallback navigation failed: {e}")
 
-                        # 3. Validate Download
                         if click_success:
-                            new_filename = wait_for_new_file(temp_download_dir, files_before, timeout=15)
-                            if new_filename:
-                                full_path = os.path.join(temp_download_dir, new_filename)
-                                
-                                # Check Validity (Magic Bytes for ZIP/Excel)
-                                is_valid = False
-                                with open(full_path, 'rb') as f:
-                                    header = f.read(4)
-                                    # PK.. = Zip/XLSX, D0CF11E0 = Legacy XLS
-                                    if header.startswith(b'PK') or header.startswith(b'\xd0\xcf\x11\xe0'):
-                                        is_valid = True
-                                
-                                if is_valid:
-                                    with open(full_path, 'rb') as f:
-                                        file_buffers['excel'] = io.BytesIO(f.read())
-                                    logger.info(f"✅ Excel Downloaded & Validated: {new_filename}")
-                                    excel_downloaded = True
-                                    break # Success!
-                                else:
-                                    logger.warning(f"❌ Invalid file detected (HTML/Corrupt) in {new_filename}. Deleting and retrying...")
-                                    try: os.remove(full_path)
-                                    except: pass
-                                    # Refresh page for retry
-                                    driver.refresh()
-                                    wait.until(EC.presence_of_element_located((By.ID, "top-ratios")))
+                            # Validate magic bytes (ZIP/XLSX = PK, Legacy XLS = D0CF11E0)
+                            is_valid = excel_bytes[:2] == b'PK' or excel_bytes[:4] == b'\xd0\xcf\x11\xe0'
+                            if is_valid:
+                                file_buffers['excel'] = io.BytesIO(excel_bytes)
+                                logger.info("✅ Excel Downloaded & Validated.")
+                                excel_downloaded = True
+                                break
                             else:
-                                logger.warning(f"❌ No file appeared (Attempt {attempt+1}).")
-                        
+                                logger.warning(f"❌ Invalid file (HTML/Corrupt) on attempt {attempt+1}. Retrying...")
+                                await page.goto(url, wait_until="domcontentloaded")
+                                await page.wait_for_selector("#top-ratios", timeout=10000)
                         else:
-                            logger.warning(f"❌ Failed to click Excel button (Attempt {attempt+1}).")
+                            logger.warning(f"❌ Failed to find/click Excel export (Attempt {attempt+1}).")
 
                     except Exception as e:
-                        logger.warning(f"⚠️ Error during Excel download attempt {attempt+1}: {e}")
-                    
-                    time.sleep(2) # Wait before retry
+                        logger.warning(f"⚠️ Error during Excel attempt {attempt+1}: {e}")
+
+                    await asyncio.sleep(2)
 
                 if not excel_downloaded:
                     logger.error("❌ Failed to download valid Excel after 3 attempts.")
             else:
                 logger.info("⏭️ Skipped Excel.")
 
-            # --- PEERS ---
+            # --- 5. PEERS ---
             if need_peers and company_name:
-                peer_data = scrape_peers_data(driver)
+                peer_data = await scrape_peers_data(page)
             else:
                 logger.info("⏭️ Skipped Peers.")
 
-            # --- PPT SEARCH ---
+            # --- 6. PPT ---
             if need_ppt:
-                # ... (Original PPT Logic) ...
                 logger.info("Scanning for Investor Presentation (PPT)...")
-                # Ensure we are on the documents tab/hash if needed, though usually one page
-                driver.get(f"https://www.screener.in/company/{ticker}/#documents")
-                
+                await page.goto(f"https://www.screener.in/company/{ticker}/#documents", wait_until="domcontentloaded")
+
                 ppt_url = None
-                ppt_xpaths = [
-                    "//a[contains(@class, 'concall-link') and contains(text(), 'PPT')]",
-                    "//ul[contains(@class, 'list-links')]//a[contains(text(), 'PPT')]",
-                    "//div[contains(@class, 'documents')]//a[contains(text(), 'PPT')]"
+                ppt_selectors = [
+                    "a.concall-link:has-text('PPT')",
+                    "ul.list-links a:has-text('PPT')",
+                    "div.documents a:has-text('PPT')",
                 ]
 
-                for xpath in ppt_xpaths:
+                for sel in ppt_selectors:
                     try:
-                        ppt_elements = driver.find_elements(By.XPATH, xpath)
-                        if ppt_elements:
-                            ppt_url = ppt_elements[0].get_attribute('href')
-                            logger.info(f"   > Found PPT via XPath: {xpath}")
+                        el = page.locator(sel)
+                        if await el.count() > 0:
+                            ppt_url = await el.first.get_attribute('href')
+                            logger.info(f"   > Found PPT via selector: {sel}")
                             break
-                    except: continue
+                    except Exception:
+                        continue
 
                 if ppt_url:
-                    download_headers = session.headers.copy()
-                    if 'Referer' in download_headers: del download_headers['Referer']
-                    download_headers.update({
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                        "Upgrade-Insecure-Requests": "1"
-                    })
-
+                    # Attempt 1: requests download
                     try:
-                        logger.info("   > Attempting download via Requests...")
-                        r = session.get(ppt_url, headers=download_headers, stream=True, timeout=15)
+                        logger.info("   > Attempting PPT download via Requests...")
+                        r = session.get(ppt_url, stream=True, timeout=15)
                         r.raise_for_status()
                         file_buffers['investor_presentation'] = io.BytesIO(r.content)
                         logger.info(f"     ✅ PPT Downloaded via Requests ({len(r.content)/1024/1024:.2f} MB)")
-
-                    except Exception as req_e:
-                        logger.warning(f"     ⚠️ Requests blocked/timed out. Switching to 'Natural Click'...")
-
+                    except Exception:
+                        # Attempt 2: Playwright natural click download
+                        logger.warning("     ⚠️ Requests blocked. Switching to Natural Click...")
                         try:
-                            files_before_ppt = os.listdir(temp_download_dir)
-                            xpath = ppt_xpaths[0]
-                            link_element = driver.find_element(By.XPATH, xpath)
-                            driver.execute_script("arguments[0].removeAttribute('target');", link_element)
-                            driver.execute_script("arguments[0].click();", link_element)
-                            
-                            ppt_filename = wait_for_new_file(temp_download_dir, files_before_ppt, timeout=60)
-                            
-                            if ppt_filename:
-                                full_path = os.path.join(temp_download_dir, ppt_filename)
-                                with open(full_path, 'rb') as f:
-                                    file_buffers['investor_presentation'] = io.BytesIO(f.read())
-                                logger.info(f"     ✅ PPT Downloaded to Disk: {ppt_filename}")
-                                if driver.current_url != url: driver.back()
-                            else:
-                                logger.warning("     ⚠️ File not found on disk. Checking if browser is viewing the PDF...")
-                                if getattr(driver, 'current_url', '').lower().endswith('.pdf'):
-                                    logger.info("     > Browser is displaying PDF! Extracting data via JavaScript...")
-                                    # --- JS INJECTION FALLBACK ---
-                                    js_grab_pdf = """
-                                        var uri = window.location.href;
-                                        var callback = arguments[arguments.length - 1];
-                                        fetch(uri, {credentials: 'include'})
-                                            .then(resp => {
-                                                if (!resp.ok) throw new Error('Network response was not ok');
-                                                return resp.arrayBuffer();
-                                            })
-                                            .then(buffer => {
-                                                var binary = '';
-                                                var bytes = new Uint8Array(buffer);
-                                                var len = bytes.byteLength;
-                                                for (var i = 0; i < len; i++) {
-                                                    binary += String.fromCharCode(bytes[i]);
-                                                }
-                                                callback(window.btoa(binary));
-                                            })
-                                            .catch(err => callback('ERROR: ' + err));
-                                    """
-                                    try:
-                                        result_b64 = driver.execute_async_script(js_grab_pdf)
-                                        if result_b64 and not result_b64.startswith('ERROR'):
-                                            pdf_bytes = base64.b64decode(result_b64)
-                                            file_buffers['investor_presentation'] = io.BytesIO(pdf_bytes)
-                                            logger.info(f"     ✅ PPT Extracted via JS Injection ({len(pdf_bytes)/1024/1024:.2f} MB)")
-                                        else:
-                                            logger.error(f"     ❌ JS Extraction Failed: {result_b64}")
-                                    except Exception as js_e:
-                                        logger.error(f"     ❌ JS Extraction Crashed: {js_e}")
-                                    driver.back()
-                                else:
-                                    logger.error(f"     ❌ Selenium Failed. Not on PDF URL.")
-                                    if driver.current_url != url: driver.back()
-
-                        except Exception as e: 
-                            logger.error(f"     ❌ Selenium Critical Error: {e}")
-                            if driver.current_url != url: driver.back()
+                            sel = ppt_selectors[0]
+                            link_el = page.locator(sel).first
+                            # Remove target="_blank" so download happens in same context
+                            await link_el.evaluate("el => el.removeAttribute('target')")
+                            async with page.expect_download(timeout=60000) as dl_info:
+                                await link_el.click()
+                            dl = await dl_info.value
+                            dl_path = await dl.path()
+                            with open(dl_path, 'rb') as f:
+                                ppt_bytes = f.read()
+                            file_buffers['investor_presentation'] = io.BytesIO(ppt_bytes)
+                            logger.info(f"     ✅ PPT Downloaded via Click ({len(ppt_bytes)/1024/1024:.2f} MB)")
+                        except Exception as e:
+                            logger.error(f"     ❌ PPT Download Failed: {e}")
                 else:
                     logger.info("   > No PPT link found.")
             else:
                 logger.info("⏭️ Skipped PPT.")
 
-            # --- CREDIT RATINGS ---
+            # --- 7. CREDIT RATINGS ---
             if need_credit_report:
-                 # ... (Original Credit Logic) ...
                 logger.info("Checking for Credit Ratings...")
                 try:
-                    if "documents" not in driver.current_url:
-                         driver.get(f"https://www.screener.in/company/{ticker}/#documents")
+                    if "documents" not in page.url:
+                        await page.goto(f"https://www.screener.in/company/{ticker}/#documents", wait_until="domcontentloaded")
 
-                    header_xpath = "//h3[contains(text(), 'Credit ratings')]"
+                    await page.wait_for_load_state("networkidle", timeout=10000)
+
+                    # Wait for credit ratings heading to confirm section is rendered
                     try:
-                        wait.until(EC.presence_of_element_located((By.XPATH, header_xpath)))
-                    except TimeoutException: pass
+                        await page.wait_for_selector("h3:has-text('Credit ratings')", timeout=8000)
+                    except PlaywrightTimeoutError:
+                        logger.warning("   > 'Credit ratings' heading not found on page.")
 
-                    rating_links = driver.find_elements(By.XPATH, "//h3[contains(text(), 'Credit ratings')]/..//li//a")
+                    # Use XPath — identical to the original working Selenium implementation.
+                    # Goes UP to the parent of the h3, then finds all li > a descendants.
+                    rating_links = await page.locator(
+                        "xpath=//h3[contains(text(), 'Credit ratings')]/..//li//a"
+                    ).all()
+                    logger.info(f"   > XPath primary: found {len(rating_links)} rating link(s).")
+
                     if not rating_links:
-                        rating_links = driver.find_elements(By.XPATH, "//section[@id='documents']//a[contains(text(), 'CRISIL') or contains(text(), 'ICRA') or contains(text(), 'CARE') or contains(text(), 'India Ratings')]")
+                        # Fallback: any link in documents section with Rating-related text
+                        rating_links = await page.locator(
+                            "xpath=//section[@id='documents']//a["
+                            "contains(text(), 'CRISIL') or contains(text(), 'ICRA') or "
+                            "contains(text(), 'CARE') or contains(text(), 'India Ratings') or "
+                            "contains(text(), 'Rating')]"
+                        ).all()
+                        logger.info(f"   > XPath fallback: found {len(rating_links)} rating link(s).")
 
                     if rating_links:
-                        latest_rating = rating_links[0] 
-                        rating_url = latest_rating.get_attribute('href')
-                        
-                        if rating_url.lower().endswith('.pdf'):
+                        for rating_link in rating_links:
+                            rating_url = await rating_link.get_attribute('href')
+                            if not rating_url:
+                                continue
+                            
+                            logger.info(f"   > Trying Rating URL: {rating_url}")
+                            
+                            # Extract the date text from the link (e.g. "Rating update\n7 Oct 2025 from icra")
                             try:
-                                r = session.get(rating_url, stream=True, timeout=15)
-                                r.raise_for_status()
-                                file_buffers['credit_rating_doc'] = io.BytesIO(r.content)
-                                file_buffers['credit_rating_type'] = 'pdf'
-                                logger.info("     ✅ Rating PDF Downloaded.")
-                            except: pass
-                        else:
-                            if "icra.in" in rating_url:
-                                files_before_rating = os.listdir(temp_download_dir)
-                                driver.get(rating_url)
+                                link_text = await rating_link.inner_text()
+                                date_text = link_text.split('\n')[-1].strip() if '\n' in link_text else link_text.strip()
+                            except Exception:
+                                date_text = "Unknown Date"
+
+                            if rating_url.lower().endswith('.pdf'):
                                 try:
-                                    download_btn = wait.until(EC.element_to_be_clickable((By.ID, "DownloadRatingReport")))
-                                    download_btn.click()
-                                    rating_filename = wait_for_new_file(temp_download_dir, files_before_rating, timeout=20)
-                                    if rating_filename:
-                                        with open(os.path.join(temp_download_dir, rating_filename), 'rb') as f:
-                                            file_buffers['credit_rating_doc'] = io.BytesIO(f.read())
-                                        file_buffers['credit_rating_type'] = 'pdf'
-                                        logger.info(f"     ✅ ICRA PDF Downloaded: {rating_filename}")
-                                    driver.back()
-                                except: driver.back()
+                                    r = session.get(rating_url, stream=True, timeout=15)
+                                    r.raise_for_status()
+                                    file_buffers['credit_rating_doc'] = io.BytesIO(r.content)
+                                    file_buffers['credit_rating_type'] = 'pdf'
+                                    file_buffers['credit_rating_date'] = date_text
+                                    logger.info(f"     ✅ Rating PDF Downloaded directly ({date_text}).")
+                                    break # Success, stop looking
+                                except Exception as e:
+                                    logger.error(f"     ❌ Direct PDF download failed: {e}")
+                            
+                            elif "icra.in" in rating_url:
+                                await page.goto(rating_url, wait_until="domcontentloaded")
+                                try:
+                                    # Check if the page explicitly says there's no file
+                                    page_text = await page.locator('body').inner_text()
+                                    if "NO FILE TO VIEW" in page_text.upper():
+                                        logger.warning("     ⚠️ ICRA reports 'NO FILE TO VIEW'. Skipping to next link...")
+                                        await page.go_back()
+                                        continue
+
+                                    download_btn = page.locator("#DownloadRatingReport")
+                                    await download_btn.wait_for(timeout=10000)
+                                    async with page.expect_download(timeout=15000) as dl_info:
+                                        await download_btn.click()
+                                    dl = await dl_info.value
+                                    dl_path = await dl.path()
+                                    with open(dl_path, 'rb') as f:
+                                        rating_bytes = f.read()
+                                    file_buffers['credit_rating_doc'] = io.BytesIO(rating_bytes)
+                                    file_buffers['credit_rating_type'] = 'pdf'
+                                    file_buffers['credit_rating_date'] = date_text
+                                    logger.info(f"     ✅ ICRA PDF Downloaded via button ({date_text}).")
+                                    await page.go_back()
+                                    break # Success, stop looking
+                                except PlaywrightTimeoutError:
+                                    logger.warning("     ⚠️ ICRA button timeout. Skipping to next link...")
+                                    await page.go_back()
+                                except Exception as e:
+                                    logger.warning(f"     ⚠️ ICRA download failed: {e}. Skipping...")
+                                    await page.go_back()
+                            
                             else:
-                                driver.get(rating_url)
-                                time.sleep(2) 
+                                logger.info(f"   > Navigating to rating page: {rating_url}")
+                                await page.goto(rating_url, wait_until="domcontentloaded")
+                                await asyncio.sleep(2)
                                 try:
-                                    page_text = driver.find_element(By.TAG_NAME, 'body').text
-                                    file_buffers['credit_rating_doc'] = page_text
-                                    file_buffers['credit_rating_type'] = 'html'
-                                    logger.info(f"     ✅ Rating Text Scraped ({len(page_text)} chars).")
-                                    driver.back() 
-                                except: pass
+                                    page_text = await page.locator('body').inner_text()
+                                    if len(page_text) > 200:
+                                        file_buffers['credit_rating_doc'] = page_text
+                                        file_buffers['credit_rating_type'] = 'html'
+                                        file_buffers['credit_rating_date'] = date_text
+                                        logger.info(f"     ✅ Rating Text Scraped ({len(page_text)} chars) ({date_text}).")
+                                        await page.go_back()
+                                        break # Success, stop looking
+                                    else:
+                                        logger.warning("     ⚠️ Page text too short, skipping...")
+                                        await page.go_back()
+                                except Exception as e:
+                                    logger.error(f"     ❌ Page text scrape failed: {e}")
+                                    await page.go_back()
                     else:
                         logger.info("   > No Credit Rating links found.")
                 except Exception as e:
@@ -445,67 +444,131 @@ def download_financial_data(
             else:
                 logger.info("⏭️ Skipped Credit Ratings.")
 
-            # --- TRANSCRIPTS ---
+            # --- 8. TRANSCRIPTS ---
             if need_transcripts:
-                # ... (Original Transcript Logic) ...
                 logger.info("Scanning for Concall Transcripts...")
                 try:
-                    if "documents" not in driver.current_url:
-                        driver.get(f"https://www.screener.in/company/{ticker}/#documents")
+                    if "documents" not in page.url:
+                        await page.goto(f"https://www.screener.in/company/{ticker}/#documents", wait_until="domcontentloaded")
 
-                    transcripts_xpath = "//h3[normalize-space()='Concalls']/following::a[contains(@class, 'concall-link') and contains(text(), 'Transcript')]"
-                    transcript_elements = driver.find_elements(By.XPATH, transcripts_xpath)
-                    
-                    transcript_urls = [elem.get_attribute('href') for elem in transcript_elements if elem]
-                    
+                    # Target the specific concalls section container, then find transcript links within it
+                    transcript_elements = await page.locator(
+                        ".documents.concalls a.concall-link[title='Raw Transcript'], "
+                        ".documents.concalls a.concall-link:has-text('Transcript')"
+                    ).all()
+
+                    transcript_urls = []
+                    for el in transcript_elements:
+                        href = await el.get_attribute('href')
+                        if href:
+                            transcript_urls.append(href)
+
                     successful_downloads = 0
                     for i, pdf_url in enumerate(transcript_urls):
-                        if successful_downloads >= 2: break
-                        if not pdf_url: continue
+                        if successful_downloads >= 2:
+                            break
+                        if not pdf_url:
+                            continue
 
+                        key = 'latest_transcript' if successful_downloads == 0 else 'previous_transcript'
+
+                        # Try requests first
                         try:
                             response = session.get(pdf_url, stream=True, timeout=15)
                             response.raise_for_status()
                             if 'application/pdf' in response.headers.get('Content-Type', ''):
-                                key = 'latest_transcript' if successful_downloads == 0 else 'previous_transcript'
                                 file_buffers[key] = io.BytesIO(response.content)
                                 successful_downloads += 1
-                                continue 
-                        except: pass
+                                logger.info(f"     ✅ Transcript {i+1} Downloaded via Requests.")
+                                continue
+                        except Exception:
+                            pass
 
+                        # Fallback: Playwright download
                         try:
-                            files_before_pdf = os.listdir(temp_download_dir)
-                            driver.get(pdf_url)
-                            pdf_filename = wait_for_new_file(temp_download_dir, files_before_pdf, timeout=15)
-                            if pdf_filename:
-                                with open(os.path.join(temp_download_dir, pdf_filename), 'rb') as f:
-                                    key = 'latest_transcript' if successful_downloads == 0 else 'previous_transcript'
-                                    file_buffers[key] = io.BytesIO(f.read())
-                                successful_downloads += 1
-                                driver.back() 
-                            else:
-                                driver.back()
-                        except: pass
+                            async with page.expect_download(timeout=15000) as dl_info:
+                                await page.goto(pdf_url)
+                            dl = await dl_info.value
+                            dl_path = await dl.path()
+                            with open(dl_path, 'rb') as f:
+                                transcript_bytes = f.read()
+                            file_buffers[key] = io.BytesIO(transcript_bytes)
+                            successful_downloads += 1
+                            logger.info(f"     ✅ Transcript {i+1} Downloaded via Playwright.")
+                            await page.go_back()
+                        except Exception:
+                            pass
 
                 except Exception as e:
                     logger.warning(f"Error processing Transcripts: {e}")
             else:
                 logger.info("⏭️ Skipped Transcripts.")
-            
-        except TimeoutException as te:
-            logger.warning(f"Timeout on company page: {te}")
 
-    except Exception as e:
-        logger.error(f"Critical error: {e}", exc_info=True)
-    finally:
-        if driver:
-            try:
-                driver.quit()
-            except OSError:
-                pass
-        if os.path.exists(temp_download_dir):
-            shutil.rmtree(temp_download_dir, ignore_errors=True)
-
-        logger.info("Cleanup complete.")
+        except PlaywrightTimeoutError as te:
+            logger.warning(f"Timeout during scraping: {te}")
+        except Exception as e:
+            logger.error(f"Critical error: {e}", exc_info=True)
+        finally:
+            await context.close()
+            await browser.close()
+            logger.info("Browser closed. Cleanup complete.")
 
     return company_name, file_buffers, peer_data
+
+
+def download_financial_data(
+    ticker: str,
+    config: dict,
+    is_consolidated: bool = False,
+    need_excel: bool = True,
+    need_transcripts: bool = True,
+    need_ppt: bool = True,
+    need_credit_report: bool = True,
+    need_peers: bool = True,
+    metadata_only: bool = False
+) -> Tuple[Optional[str], Dict[str, Any], pd.DataFrame]:
+    """
+    Public synchronous wrapper around the async Playwright implementation.
+    Runs Playwright in a dedicated thread with its own event loop to avoid
+    conflicts with Streamlit's background thread event loop on Windows.
+    """
+    import threading
+
+    result_container = [None]
+    exception_container = [None]
+
+    def run_in_thread():
+        # On Windows, SelectorEventLoop (used in threads) doesn't support
+        # subprocess creation. ProactorEventLoop does.
+        if platform.system() == "Windows":
+            loop = asyncio.ProactorEventLoop()
+        else:
+            loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result_container[0] = loop.run_until_complete(
+                _download_financial_data_async(
+                    ticker=ticker,
+                    config=config,
+                    is_consolidated=is_consolidated,
+                    need_excel=need_excel,
+                    need_transcripts=need_transcripts,
+                    need_ppt=need_ppt,
+                    need_credit_report=need_credit_report,
+                    need_peers=need_peers,
+                    metadata_only=metadata_only,
+                )
+            )
+        except Exception as e:
+            exception_container[0] = e
+        finally:
+            loop.close()
+
+    thread = threading.Thread(target=run_in_thread, daemon=True)
+    thread.start()
+    thread.join()
+
+    if exception_container[0]:
+        raise exception_container[0]
+
+    return result_container[0]

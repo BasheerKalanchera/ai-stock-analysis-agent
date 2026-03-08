@@ -1,4 +1,21 @@
-﻿import streamlit as st
+﻿"""
+app.py
+======
+Main Streamlit application for the AI Stock Analysis Agent. Manages the UI,
+workflow selection (Full Analysis, Risk Only, Strategy Only, Latest Concall,
+Batch Analysis), checkpointer setup with Neon PostgreSQL, and orchestrates
+the LangGraph-based analysis pipeline.
+
+CHANGE LOG
+----------
+[2026-03-04] Increase DB connection timeouts for Neon cold starts
+  - Increased psycopg.connect timeout from 10s to 20s.
+  - Increased ConnectionPool connect_timeout from 10s to 20s.
+  - Increased pool.open() timeout from 10s to 15s.
+  - Raised hard wall-clock cap from 40s to 45s.
+  - Updated user-facing timeout warning message.
+"""
+import streamlit as st
 import os
 import datetime
 from dotenv import load_dotenv
@@ -61,7 +78,7 @@ def setup_checkpointer():
         with psycopg.connect(
             url_ipv4,
             autocommit=True,
-            connect_timeout=10,
+            connect_timeout=20, # Increased bounds for Neon cold starts
         ) as setup_conn:
             PostgresSaver(setup_conn).setup()
 
@@ -75,30 +92,27 @@ def setup_checkpointer():
                 "keepalives_idle": 30,
                 "keepalives_interval": 10,
                 "keepalives_count": 5,
-                "connect_timeout": 10,
+                "connect_timeout": 20, # Increased for Neon cold starts
             },
             open=False,
             check=ConnectionPool.check_connection,
         )
-        pool.open(wait=True, timeout=10)
+        pool.open(wait=True, timeout=15)
 
         serde = StockAnalysisSerializer()
         cp = PostgresSaver(conn=pool, serde=serde)
         graphs.recompile_with_checkpointer(cp)
         return cp
 
-    # Hard 40-second wall-clock cap (was 25s — bumped after diagnostic showed
-    # 30s TCP + 0.7s SQL + 2.75s graph recompile = ~34s on a warm DB).
-    # The IPv4 hostaddr fix above should cut TCP from 30s → <1s, making this
-    # budget very comfortable. Kept at 40s as a safety margin.
+    # Hard 45-second wall-clock cap 
     with ThreadPoolExecutor(max_workers=1) as ex:
         future = ex.submit(_do_setup, db_url)
         try:
-            return future.result(timeout=40)
+            return future.result(timeout=45)
         except FuturesTimeout:
             st.sidebar.warning(
-                "⚠️ Checkpointer disabled: DB setup timed out after 25s. "
-                "Neon may be cold-starting — restart the server in ~30s to retry."
+                "⚠️ Checkpointer disabled: DB setup timed out after 45s. "
+                "Neon may be cold-starting or having networking issues."
             )
             return None
         except Exception as e:
