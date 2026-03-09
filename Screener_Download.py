@@ -9,6 +9,12 @@ cookies to a requests.Session for direct PDF downloads where possible.
 
 CHANGE LOG
 ----------
+[2026-03-08] Add keyword-based transcript filtering
+  - After downloading each transcript PDF, extract first-page text using pypdf
+    and check for special event keywords (investor day, analyst meet, AGM, etc.).
+  - If detected as a non-earnings transcript, skip it and try the next link.
+  - Ensures the qualitative agent always analyzes actual quarterly earnings calls.
+
 [2026-03-04] Fix ICRA credit rating downloads & transcript selectors
   - Refactored credit ratings to loop through ALL rating links instead of
     only checking the first one. If a link fails, it moves to the next.
@@ -46,6 +52,7 @@ import base64
 
 # --- PLAYWRIGHT IMPORTS ---
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from pypdf import PdfReader
 
 # --- LOGGER ---
 logger = logging.getLogger('screener_download')
@@ -56,6 +63,57 @@ if not logger.handlers:
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 logger.propagate = False
+
+# --- EARNINGS CALL DETECTION ---
+# Instead of trying to detect special events (too many false positives),
+# we detect POSITIVE indicators of a quarterly earnings call.
+# Every earnings call transcript prominently mentions quarter identifiers
+# on the first page. If none are found, it's likely a special event.
+EARNINGS_CALL_INDICATORS = [
+    # Quarter identifiers (most reliable)
+    " q1 ", " q2 ", " q3 ", " q4 ",
+    " q1-", " q2-", " q3-", " q4-",
+    "q1 fy", "q2 fy", "q3 fy", "q4 fy",
+    "quarter 1", "quarter 2", "quarter 3", "quarter 4",
+    "first quarter", "second quarter", "third quarter", "fourth quarter",
+    "1st quarter", "2nd quarter", "3rd quarter", "4th quarter",
+    # Earnings-specific phrases
+    "earnings call", "earnings conference",
+    "results conference", "results call",
+    "quarterly results", "financial results",
+    "quarterly earnings",
+]
+
+
+def _is_earnings_call_transcript(pdf_bytes_io: io.BytesIO) -> bool:
+    """
+    Checks whether a downloaded transcript PDF is a quarterly earnings call
+    (returns True) or a special event like Investor Day/AGM (returns False).
+    Uses POSITIVE detection: looks for quarter identifiers (Q1/Q2/Q3/Q4)
+    and earnings-related phrases on the first page. If none are found,
+    the transcript is classified as a non-earnings special event.
+    """
+    try:
+        pdf_bytes_io.seek(0)
+        reader = PdfReader(pdf_bytes_io)
+        if not reader.pages:
+            return True  # Can't determine — assume earnings call
+        first_page_text = reader.pages[0].extract_text() or ""
+        first_page_lower = f" {first_page_text.lower()} "  # Pad with spaces for word boundary matching
+
+        for indicator in EARNINGS_CALL_INDICATORS:
+            if indicator in first_page_lower:
+                pdf_bytes_io.seek(0)
+                return True  # Confirmed earnings call
+
+        # No earnings indicators found — likely a special event
+        logger.info(f"     🔍 No earnings call indicators found on first page. Classifying as special event.")
+        pdf_bytes_io.seek(0)
+        return False
+    except Exception as e:
+        logger.warning(f"     ⚠️ Could not classify transcript: {e}. Assuming earnings call.")
+        pdf_bytes_io.seek(0)
+        return True  # On error, assume earnings call to avoid skipping valid data
 
 
 async def scrape_peers_data(page) -> pd.DataFrame:
@@ -464,6 +522,7 @@ async def _download_financial_data_async(
                             transcript_urls.append(href)
 
                     successful_downloads = 0
+                    skipped_special_events = 0
                     for i, pdf_url in enumerate(transcript_urls):
                         if successful_downloads >= 2:
                             break
@@ -471,33 +530,46 @@ async def _download_financial_data_async(
                             continue
 
                         key = 'latest_transcript' if successful_downloads == 0 else 'previous_transcript'
+                        pdf_bytes_io = None
 
                         # Try requests first
                         try:
                             response = session.get(pdf_url, stream=True, timeout=15)
                             response.raise_for_status()
                             if 'application/pdf' in response.headers.get('Content-Type', ''):
-                                file_buffers[key] = io.BytesIO(response.content)
-                                successful_downloads += 1
-                                logger.info(f"     ✅ Transcript {i+1} Downloaded via Requests.")
-                                continue
+                                pdf_bytes_io = io.BytesIO(response.content)
                         except Exception:
                             pass
 
                         # Fallback: Playwright download
-                        try:
-                            async with page.expect_download(timeout=15000) as dl_info:
-                                await page.goto(pdf_url)
-                            dl = await dl_info.value
-                            dl_path = await dl.path()
-                            with open(dl_path, 'rb') as f:
-                                transcript_bytes = f.read()
-                            file_buffers[key] = io.BytesIO(transcript_bytes)
-                            successful_downloads += 1
-                            logger.info(f"     ✅ Transcript {i+1} Downloaded via Playwright.")
-                            await page.go_back()
-                        except Exception:
-                            pass
+                        if pdf_bytes_io is None:
+                            try:
+                                async with page.expect_download(timeout=15000) as dl_info:
+                                    await page.goto(pdf_url)
+                                dl = await dl_info.value
+                                dl_path = await dl.path()
+                                with open(dl_path, 'rb') as f:
+                                    transcript_bytes = f.read()
+                                pdf_bytes_io = io.BytesIO(transcript_bytes)
+                                await page.go_back()
+                            except Exception:
+                                pass
+
+                        if pdf_bytes_io is None:
+                            continue
+
+                        # --- KEYWORD FILTER: Skip non-earnings-call transcripts ---
+                        if not _is_earnings_call_transcript(pdf_bytes_io):
+                            skipped_special_events += 1
+                            logger.info(f"     ⏭️ Transcript {i+1} skipped (Special Event, not quarterly earnings).")
+                            continue
+
+                        file_buffers[key] = pdf_bytes_io
+                        successful_downloads += 1
+                        logger.info(f"     ✅ Transcript {i+1} Downloaded (Earnings Call confirmed).")
+
+                    if skipped_special_events > 0:
+                        logger.info(f"   > Skipped {skipped_special_events} non-earnings transcript(s).")
 
                 except Exception as e:
                     logger.warning(f"Error processing Transcripts: {e}")

@@ -8,6 +8,12 @@ the LangGraph-based analysis pipeline.
 
 CHANGE LOG
 ----------
+[2026-03-08] Dynamic QoQ table column headers
+  - QoQ comparison table now reads column names from the LLM's JSON output
+    instead of using hardcoded "Latest/Previous Quarter Analysis" keys.
+  - Supports dynamic quarter labels like "📈 Q3 FY2026" / "📉 Q2 FY2025".
+  - Falls back gracefully if the LLM returns old-format keys.
+
 [2026-03-04] Increase DB connection timeouts for Neon cold starts
   - Increased psycopg.connect timeout from 10s to 20s.
   - Increased ConnectionPool connect_timeout from 10s to 20s.
@@ -881,18 +887,30 @@ if st.session_state.analysis_results:
                 # Convert list of dicts to DataFrame for clean display
                 df_compare = pd.DataFrame(comparison_data)
                 
-                # Header
+                # Detect dynamic column names from the JSON data
+                # The LLM now uses actual quarter labels like "📈 Q3 FY2026"
+                non_metric_cols = [c for c in df_compare.columns if c != "Metric"]
+                
+                # Find the "previous" and "latest" columns by emoji or position
+                prev_col = next((c for c in non_metric_cols if "📉" in c), 
+                                next((c for c in non_metric_cols if "Previous" in c), 
+                                     non_metric_cols[0] if non_metric_cols else None))
+                curr_col = next((c for c in non_metric_cols if "📈" in c), 
+                                next((c for c in non_metric_cols if "Latest" in c), 
+                                     non_metric_cols[-1] if len(non_metric_cols) > 1 else None))
+                
+                # Header — use the actual column names from the data
                 st.markdown("---")
                 c1, c2, c3 = st.columns([1, 2, 2])
                 c1.markdown("**Metric**")
-                c2.markdown("**📉 Previous Quarter**")
-                c3.markdown("**📈 Latest Quarter**")
+                c2.markdown(f"**{prev_col or '📉 Previous Quarter'}**")
+                c3.markdown(f"**{curr_col or '📈 Latest Quarter'}**")
                 st.divider()
                 
                 for index, row in df_compare.iterrows():
                     metric = row.get("Metric", "N/A")
-                    prev_val = row.get("Previous Quarter Analysis", "N/A")
-                    curr_val = row.get("Latest Quarter Analysis", "N/A")
+                    prev_val = row.get(prev_col, "N/A") if prev_col else "N/A"
+                    curr_val = row.get(curr_col, "N/A") if curr_col else "N/A"
                     
                     c1, c2, c3 = st.columns([1, 2, 2])
                     with c1: st.markdown(f"**{metric}**")

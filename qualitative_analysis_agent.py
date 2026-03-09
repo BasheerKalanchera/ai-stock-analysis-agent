@@ -1,3 +1,20 @@
+"""
+qualitative_analysis_agent.py
+==============================
+Orchestrates qualitative analysis of a company using Google Gemini. Runs a
+sequential pipeline: SEBI/Regulatory checks, latest earnings transcript analysis,
+previous quarter analysis, Quarter-over-Quarter comparison (JSON table output),
+and Scuttlebutt investigative research via Tavily search. Includes OCR fallback
+for scanned PDF transcripts using Gemini Vision.
+
+CHANGE LOG
+----------
+[2026-03-08] Add dynamic quarter labels to QoQ comparison table
+  - Updated _compare_transcripts prompt to instruct the LLM to extract actual
+    quarter identifiers (e.g., "Q3 FY2026") from the analysis summaries.
+  - JSON column headers now use dynamic names with emoji prefixes (📈/📉)
+    instead of generic "Latest/Previous Quarter Analysis".
+"""
 import io
 import fitz
 import google.generativeai as genai
@@ -467,22 +484,30 @@ def _analyze_positives_and_concerns(transcript_text: str, agent_config: dict) ->
     )
 
 def _compare_transcripts(latest_analysis: str, previous_analysis: str, agent_config: dict) -> str:
-    # PRESERVED: Detailed JSON Comparison Prompt
+    # PRESERVED: Detailed JSON Comparison Prompt — Enhanced with dynamic quarter labels
     prompt = f"""
     You are an expert financial analyst. Your task is to compare the company's performance based on the provided **analysis summaries** of the last two quarters.
+    
+    **STEP 1 — IDENTIFY QUARTER NAMES:**
+    Read the two analysis summaries below and identify the specific quarter labels (e.g., "Q3 FY2026", "Q2 FY'26", "Q4 FY25", etc.).
+    - The Latest Quarter label will be referred to as LATEST_Q.
+    - The Previous Quarter label will be referred to as PREVIOUS_Q.
+    If you cannot determine a specific quarter label, use "Latest Quarter" or "Previous Quarter" as fallback.
+
+    **STEP 2 — GENERATE JSON:**
     **CRITICAL INSTRUCTION:** You **must** generate your response as a single, valid JSON array of objects. Do not include any text, code blocks, or explanations before or after the JSON.
     The JSON array must contain objects with these exact keys:
     1.  "Metric"
-    2.  "Latest Quarter Analysis"
-    3.  "Previous Quarter Analysis"
+    2.  "📈 LATEST_Q" (replace LATEST_Q with the actual quarter label you identified, e.g., "📈 Q3 FY2026")
+    3.  "📉 PREVIOUS_Q" (replace PREVIOUS_Q with the actual quarter label you identified, e.g., "📉 Q2 FY2026")
     **FORMATTING:** For the analysis values, use a single string. Inside that string, use Markdown bullets (`* `).
     **IMPORTANT:** All newlines inside the JSON strings **MUST be escaped as `\\n`**. Do not use literal newlines.
-    **JSON STRUCTURE EXAMPLE (Note the `\\n`):**
+    **JSON STRUCTURE EXAMPLE (Note the `\\n` and dynamic quarter names):**
     [
       {{
         "Metric": "Overall Sentiment Shift",
-        "Latest Quarter Analysis": "* The tone is cautious.\\n* Focus on cost cutting.",
-        "Previous Quarter Analysis": "* The tone was optimistic.\\n* Focus on expansion."
+        "📈 Q3 FY2026": "* The tone is cautious.\\n* Focus on cost cutting.",
+        "📉 Q2 FY2026": "* The tone was optimistic.\\n* Focus on expansion."
       }}
     ]
     **You must include rows for at least the following metrics:**
