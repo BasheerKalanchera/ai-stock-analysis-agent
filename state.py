@@ -1,3 +1,14 @@
+"""
+state.py
+========
+Defines the main TypedDict state representation used throughout LangGraph workflows.
+
+CHANGE LOG
+----------
+[2026-03-09] Dynamic Sector-Specific Valuation
+  - Added `sector: str | None` property to `StockAnalysisState` to route scraped sector values.
+"""
+
 import io
 from typing import TypedDict, Dict, Any, List, Annotated
 import pandas as pd
@@ -6,6 +17,7 @@ import pandas as pd
 class StockAnalysisState(TypedDict):
     ticker: str
     company_name: str | None
+    sector: str | None
     file_data: Dict[str, io.BytesIO]
     peer_data: pd.DataFrame | None
     quant_results_structured: List[Dict[str, Any]] | None

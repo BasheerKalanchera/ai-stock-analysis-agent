@@ -2,8 +2,8 @@ import requests
 import json
 
 # REPLACE WITH YOUR ACTUAL API KEY
-API_KEY = "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"
-
+#API_KEY = "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"
+API_KEY = "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"
 def dump_full_json(api_key):
     url = "https://api.tavily.com/usage"
     headers = {

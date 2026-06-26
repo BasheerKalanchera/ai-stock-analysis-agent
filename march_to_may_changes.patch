@@ -1,0 +1,1240 @@
+diff --git a/Screener_Download.py b/Screener_Download.py
+index 2b5ebb8..2c463de 100644
+--- a/Screener_Download.py
++++ b/Screener_Download.py
+@@ -9,6 +9,11 @@ cookies to a requests.Session for direct PDF downloads where possible.
+ 
+ CHANGE LOG
+ ----------
++[2026-03-09] Sector Scraping for Dynamic Valuation
++  - Updated `scrape_peers_data` to also scrape the company's sector from the 
++    investor peers breadcrumb trail structure.
++  - The sector is now extracted and stored in `file_buffers['sector']`.
++
+ [2026-03-08] Add keyword-based transcript filtering
+   - After downloading each transcript PDF, extract first-page text using pypdf
+     and check for special event keywords (investor day, analyst meet, AGM, etc.).
+@@ -74,11 +79,13 @@ EARNINGS_CALL_INDICATORS = [
+     " q1 ", " q2 ", " q3 ", " q4 ",
+     " q1-", " q2-", " q3-", " q4-",
+     "q1 fy", "q2 fy", "q3 fy", "q4 fy",
++    "q1fy", "q2fy", "q3fy", "q4fy",
+     "quarter 1", "quarter 2", "quarter 3", "quarter 4",
+     "first quarter", "second quarter", "third quarter", "fourth quarter",
+     "1st quarter", "2nd quarter", "3rd quarter", "4th quarter",
+     # Earnings-specific phrases
+     "earnings call", "earnings conference",
++    "earning call", "earning conference",
+     "results conference", "results call",
+     "quarterly results", "financial results",
+     "quarterly earnings",
+@@ -90,24 +97,42 @@ def _is_earnings_call_transcript(pdf_bytes_io: io.BytesIO) -> bool:
+     Checks whether a downloaded transcript PDF is a quarterly earnings call
+     (returns True) or a special event like Investor Day/AGM (returns False).
+     Uses POSITIVE detection: looks for quarter identifiers (Q1/Q2/Q3/Q4)
+-    and earnings-related phrases on the first page. If none are found,
++    and earnings-related phrases on the first 2 pages. If none are found,
+     the transcript is classified as a non-earnings special event.
++
++    Why 2 pages? Indian concall PDFs typically have a BSE/NSE regulatory
++    cover letter on page 1 that may not always contain "earnings conference".
++    The actual transcript title page (with Q1/Q2/Q3/Q4 identifiers) is
++    usually on page 2.
+     """
+     try:
+         pdf_bytes_io.seek(0)
+         reader = PdfReader(pdf_bytes_io)
+         if not reader.pages:
+             return True  # Can't determine — assume earnings call
+-        first_page_text = reader.pages[0].extract_text() or ""
+-        first_page_lower = f" {first_page_text.lower()} "  # Pad with spaces for word boundary matching
++
++        # Extract text from the first 2 pages (cover letter + title page)
++        combined_text = ""
++        for i in range(min(2, len(reader.pages))):
++            combined_text += (reader.pages[i].extract_text() or "") + " "
++        
++        # If the PDF is a scanned image, extract_text() will return nothing.
++        # It's better to assume it's valid than to aggressively skip it.
++        if len(combined_text.strip()) < 50:
++            logger.info("     🔍 Extracted text is empty (likely scanned PDF). Assuming earnings call.")
++            pdf_bytes_io.seek(0)
++            return True
++
++        # Normalize all whitespace (newlines, tabs, multiple spaces) into single spaces
++        normalized_text = f" {' '.join(combined_text.lower().split())} "
+ 
+         for indicator in EARNINGS_CALL_INDICATORS:
+-            if indicator in first_page_lower:
++            if indicator in normalized_text:
+                 pdf_bytes_io.seek(0)
+                 return True  # Confirmed earnings call
+ 
+         # No earnings indicators found — likely a special event
+-        logger.info(f"     🔍 No earnings call indicators found on first page. Classifying as special event.")
++        logger.info(f"     🔍 No earnings call indicators found on first 2 pages. Classifying as special event.")
+         pdf_bytes_io.seek(0)
+         return False
+     except Exception as e:
+@@ -116,8 +141,11 @@ def _is_earnings_call_transcript(pdf_bytes_io: io.BytesIO) -> bool:
+         return True  # On error, assume earnings call to avoid skipping valid data
+ 
+ 
+-async def scrape_peers_data(page) -> pd.DataFrame:
+-    """Scrapes the Peers table from the current company page."""
++async def scrape_peers_data(page) -> tuple:
++    """Scrapes the Peers table and sector breadcrumb from the current company page.
++    Returns (peer_df: pd.DataFrame, sector: str).
++    """
++    sector = "Unknown"
+     try:
+         logger.info("Attempting to scrape Peers table...")
+         target_id = "peers-table-placeholder"
+@@ -129,6 +157,27 @@ async def scrape_peers_data(page) -> pd.DataFrame:
+ 
+         await container.scroll_into_view_if_needed()
+ 
++        # --- SECTOR BREADCRUMB SCRAPE ---
++        try:
++            breadcrumb_els = await page.locator(
++                "#peers a[href*='/market/'], "
++                "#peers-table-placeholder a[href*='/market/']"
++            ).all()
++            if breadcrumb_els:
++                texts = []
++                for el in breadcrumb_els:
++                    t = (await el.inner_text()).strip()
++                    if t:
++                        texts.append(t)
++                # Use second-to-last for broader industry grouping, or last if only one
++                sector = texts[-2] if len(texts) >= 2 else texts[-1] if texts else "Unknown"
++                logger.info(f"✅ Sector Identified: {sector} (breadcrumb: {' > '.join(texts)})")
++            else:
++                logger.warning("Sector breadcrumb not found in Peers section.")
++        except Exception as e:
++            logger.warning(f"Could not scrape sector breadcrumb: {e}")
++
++        # --- PEERS TABLE SCRAPE ---
+         table_selector = f"#{target_id} table"
+         try:
+             table_element = await page.wait_for_selector(table_selector, timeout=10000)
+@@ -145,10 +194,10 @@ async def scrape_peers_data(page) -> pd.DataFrame:
+                 peer_df = peer_df.drop(columns=["S.No."])
+             peer_df = peer_df.loc[:, ~peer_df.columns.str.contains('^Unnamed', case=False)]
+             logger.info(f"✅ SUCCESS: Scraped Peer Data Table ({len(peer_df)} rows).")
+-            return peer_df
++            return peer_df, sector
+     except Exception as e:
+         logger.warning(f"Could not scrape Peers table: {e}")
+-    return pd.DataFrame()
++    return pd.DataFrame(), sector
+ 
+ 
+ async def _download_financial_data_async(
+@@ -329,7 +378,8 @@ async def _download_financial_data_async(
+ 
+             # --- 5. PEERS ---
+             if need_peers and company_name:
+-                peer_data = await scrape_peers_data(page)
++                peer_data, scraped_sector = await scrape_peers_data(page)
++                file_buffers['sector'] = scraped_sector
+             else:
+                 logger.info("⏭️ Skipped Peers.")
+ 
+@@ -393,7 +443,10 @@ async def _download_financial_data_async(
+                     if "documents" not in page.url:
+                         await page.goto(f"https://www.screener.in/company/{ticker}/#documents", wait_until="domcontentloaded")
+ 
+-                    await page.wait_for_load_state("networkidle", timeout=10000)
++                    try:
++                        await page.wait_for_load_state("networkidle", timeout=10000)
++                    except PlaywrightTimeoutError:
++                        logger.warning("   > networkidle timeout (non-fatal). Continuing...")
+ 
+                     # Wait for credit ratings heading to confirm section is rendered
+                     try:
+diff --git a/app.py b/app.py
+index 0525f89..00faeec 100644
+--- a/app.py
++++ b/app.py
+@@ -1,4 +1,4 @@
+-﻿"""
++"""
+ app.py
+ ======
+ Main Streamlit application for the AI Stock Analysis Agent. Manages the UI,
+@@ -8,6 +8,10 @@ the LangGraph-based analysis pipeline.
+ 
+ CHANGE LOG
+ ----------
++[2026-03-09] Dynamic Sector-Specific Valuation
++  - Integrated "⚙️ Valuation Skills Editor" in the sidebar for managing sector skills.
++  - Valuation node now receives expanded context, including 'quant_text_for_synthesis' and 'strategy_results'.
++
+ [2026-03-08] Dynamic QoQ table column headers
+   - QoQ comparison table now reads column names from the LLM's JSON output
+     instead of using hardcoded "Latest/Previous Quarter Analysis" keys.
+@@ -199,7 +203,7 @@ def cleanup_checkpoint(ticker_symbol, workflow_mode):
+         pass  # Non-critical — don't break the app if cleanup fails
+ 
+ # --- Runner Function ---
+-def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_container, progress_text_container, workflow_mode, resume_mode=False):
++def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_container, progress_text_container, workflow_mode, resume_mode=False, manual_files=None):
+     # Deterministic thread ID: same ticker + workflow always maps to same thread
+     thread_id = f"{ticker_symbol}-{workflow_mode.replace(' ', '_').replace('(', '').replace(')', '')}"
+     stream_config = {"configurable": {"thread_id": thread_id}}
+@@ -213,6 +217,9 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
+         "workflow_mode": workflow_mode
+     }
+     
++    if manual_files:
++        fresh_inputs["file_data"] = manual_files
++    
+     # Select target graph first (needed for checkpoint lookup)
+     graph_map = {
+         "Quantitative Deep-Dive": graphs.quant_only_graph,
+@@ -603,6 +610,21 @@ workflow_mode = st.sidebar.selectbox(
+ )
+ # ------------------------------------
+ 
++manual_transcript_upload = False
++latest_transcript_file = None
++previous_transcript_file = None
++
++if workflow_mode == "QoQ Concall Analysis":
++    manual_transcript_upload = st.sidebar.checkbox("Manually Upload Transcripts", help="Bypass screener download and manually provide transcripts.")
++    if manual_transcript_upload:
++        latest_transcript_file = st.sidebar.file_uploader("Upload Latest Quarter Transcript (PDF)", type=['pdf'])
++        previous_transcript_file = st.sidebar.file_uploader("Upload Previous Quarter Transcript (PDF)", type=['pdf'])
++
++elif workflow_mode == "Latest Concall Analysis":
++    manual_transcript_upload = st.sidebar.checkbox("Manually Upload Transcript", help="Bypass screener download and manually provide a transcript.")
++    if manual_transcript_upload:
++        latest_transcript_file = st.sidebar.file_uploader("Upload Transcript (PDF)", type=['pdf'])
++
+ analysis_mode = st.sidebar.radio("Analysis Mode", ["Single Ticker", "Batch Analysis"])
+ 
+ tickers_to_process = []
+@@ -628,6 +650,70 @@ if st.sidebar.button("🗑️ Clear Results"):
+     st.session_state.analysis_results = {}
+     st.rerun()
+ 
++# --- VALUATION SKILLS EDITOR ---
++from skills_loader import list_skills, read_skill, save_skill, create_skill, delete_skill
++
++with st.sidebar.expander("⚙️ Valuation Skills Editor", expanded=False):
++    all_skills = list_skills()
++    if all_skills:
++        skill_names = [s['filename'] for s in all_skills]
++        selected_skill = st.selectbox("Select Skill", skill_names, key="skill_selector")
++
++        # Load and display content
++        try:
++            skill_content = read_skill(selected_skill)
++            edited_content = st.text_area(
++                "Edit Skill Content",
++                value=skill_content,
++                height=300,
++                key="skill_editor"
++            )
++
++            col_save, col_del = st.columns(2)
++            with col_save:
++                if st.button("💾 Save", key="save_skill"):
++                    try:
++                        save_skill(selected_skill, edited_content)
++                        st.success(f"Saved {selected_skill}")
++                    except Exception as e:
++                        st.error(str(e))
++            with col_del:
++                if st.button("🗑️ Delete", key="del_skill",
++                             disabled=(selected_skill == "_default.md")):
++                    try:
++                        delete_skill(selected_skill)
++                        st.success(f"Deleted {selected_skill}")
++                        st.rerun()
++                    except Exception as e:
++                        st.error(str(e))
++
++            # Show which sectors this skill matches
++            skill_info = next((s for s in all_skills if s['filename'] == selected_skill), None)
++            if skill_info and skill_info['sector_aliases']:
++                st.caption(f"**Matches**: {', '.join(skill_info['sector_aliases'])}")
++
++        except Exception as e:
++            st.error(f"Could not load skill: {e}")
++
++        # Create New
++        st.markdown("---")
++        st.markdown("**Create New Skill**")
++        new_name = st.text_input("Filename (e.g. real_estate.md)", key="new_skill_name")
++        new_content = st.text_area("Content", height=150, key="new_skill_content",
++                                   placeholder="---\nsector_aliases:\n  - \"Real Estate\"\n---\n# Real Estate Valuation Skill\n...")
++        if st.button("✨ Create", key="create_skill"):
++            if new_name and new_content:
++                try:
++                    create_skill(new_name, new_content)
++                    st.success(f"Created {new_name}")
++                    st.rerun()
++                except Exception as e:
++                    st.error(str(e))
++            else:
++                st.warning("Provide both filename and content.")
++    else:
++        st.warning("No skills found. Create your first skill below.")
++
+ if st.sidebar.button("🚀 Run Analysis", type="primary"):
+     if not tickers_to_process:
+         st.sidebar.warning("Please enter at least one ticker.")
+@@ -653,7 +739,19 @@ if st.sidebar.button("🚀 Run Analysis", type="primary"):
+                     progress_text = st.empty()
+                     
+                     # Pass workflow_mode to runner
+-                    result_state = run_analysis_for_ticker(ticker, is_consolidated, status, progress_text, workflow_mode, resume_mode)
++                    manual_files = None
++                    if workflow_mode == "QoQ Concall Analysis" and manual_transcript_upload:
++                        manual_files = {}
++                        if latest_transcript_file:
++                            manual_files["latest_transcript"] = io.BytesIO(latest_transcript_file.getvalue())
++                        if previous_transcript_file:
++                            manual_files["previous_transcript"] = io.BytesIO(previous_transcript_file.getvalue())
++                    elif workflow_mode == "Latest Concall Analysis" and manual_transcript_upload:
++                        manual_files = {}
++                        if latest_transcript_file:
++                            manual_files["latest_transcript"] = io.BytesIO(latest_transcript_file.getvalue())
++
++                    result_state = run_analysis_for_ticker(ticker, is_consolidated, status, progress_text, workflow_mode, resume_mode, manual_files)
+                     
+                     # 3. INCREMENTAL COMMIT (Save immediately)
+                     st.session_state.analysis_results[ticker] = result_state
+diff --git a/check_Tavily_usage.py b/check_Tavily_usage.py
+index 2afb855..2c704a2 100644
+--- a/check_Tavily_usage.py
++++ b/check_Tavily_usage.py
+@@ -2,8 +2,8 @@ import requests
+ import json
+ 
+ # REPLACE WITH YOUR ACTUAL API KEY
+-API_KEY = "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"
+-
++#API_KEY = "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"
++API_KEY = "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"
+ def dump_full_json(api_key):
+     url = "https://api.tavily.com/usage"
+     headers = {
+diff --git a/graphs.py b/graphs.py
+index 1e5ccae..90b4bfa 100644
+--- a/graphs.py
++++ b/graphs.py
+@@ -1,3 +1,17 @@
++"""
++graphs.py
++=========
++Defines the LangGraph workflows for the AI Stock Analysis Agent. Contains the main
++full workflow and all the specialized "deep-dive" isolated workflows.
++
++CHANGE LOG
++----------
++[2026-03-09] Standalone Valuation Deep-Dive Fix
++  - Rewired `valuation_only_graph` to include `quant_prereq` and `strategy_prereq` nodes.
++  - This ensures that when the Valuation agent runs standalone, it has the rich financial
++    time-series and sector KPI extractions needed to fulfill its grounded methodology constraints.
++"""
++
+ from langgraph.graph import StateGraph, END
+ from state import StockAnalysisState
+ import nodes
+@@ -110,11 +124,22 @@ quant_only_graph = quant_workflow_def.compile()
+ # 8. VALUATION DEEP-DIVE GRAPH
+ # ==============================================================================
+ val_workflow_def = StateGraph(StockAnalysisState)
++
++# 1. Fetch Data
+ val_workflow_def.add_node("screener_for_valuation", nodes.screener_for_valuation_node)
++
++# 2. Run Prerequisites (Quant & Strategy) to build context for grounding
++val_workflow_def.add_node("quant_prereq", nodes.quantitative_analysis_node)
++val_workflow_def.add_node("strategy_prereq", nodes.strategy_analysis_node)
++
++# 3. Run Main Agent
+ val_workflow_def.add_node("isolated_valuation", nodes.isolated_valuation_node)
+ 
++# Define Flow
+ val_workflow_def.set_entry_point("screener_for_valuation")
+-val_workflow_def.add_edge("screener_for_valuation", "isolated_valuation")
++val_workflow_def.add_edge("screener_for_valuation", "quant_prereq")
++val_workflow_def.add_edge("quant_prereq", "strategy_prereq")
++val_workflow_def.add_edge("strategy_prereq", "isolated_valuation")
+ val_workflow_def.add_edge("isolated_valuation", END)
+ 
+ valuation_only_graph = val_workflow_def.compile()
+diff --git a/nodes.py b/nodes.py
+index 58070fa..593411a 100644
+--- a/nodes.py
++++ b/nodes.py
+@@ -1,3 +1,21 @@
++"""
++nodes.py
++========
++Contains all LangGraph nodes for the stock analysis workflows.
++
++CHANGE LOG
++----------
++[2026-03-09] Standalone Valuation Deep-Dive Fix
++  - Updated `screener_for_valuation_node` to download `need_excel=True` and `need_ppt=True`.
++  - Updated `isolated_valuation_node` to pass the `quant_context` and `strategy_context` to
++    the core valuation analysis function, ensuring the standalone graph supports grounding.
++
++[2026-03-09] Dynamic Sector-Specific Valuation
++  - Re-wired `fetch_data_node` and all valuation-related nodes to pass the `sector` attribute.
++  - Updated `valuation_analysis_node` to pass combined output from Quantitative and Strategy agents 
++    (quant_context & strategy_context) as extra arguments to ground the valuation agent.
++"""
++
+ import datetime
+ import io
+ import time
+@@ -75,9 +93,11 @@ def fetch_data_node(state: StockAnalysisState):
+     
+     timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+     peer_status = "Downloaded" if not peer_data.empty else "Not Found/Failed"
++    sector = file_data.get('sector', 'Unknown') if file_data else 'Unknown'
+     
+     log_entry = (f"## AGENT 1: DOWNLOAD SUMMARY for {company_name or ticker}\n\n"
+                  f"**Timestamp**: {timestamp_str}\n\n"
++                 f"**Sector**: {sector}\n\n"
+                  f"**Excel Data**: {'Downloaded' if file_data.get('excel') else 'Failed'}\n\n"
+                  f"**Peer Data**: {peer_status}\n\n"
+                  f"**Latest Transcript**: {'Downloaded' if file_data.get('latest_transcript') else 'Failed'}\n\n"
+@@ -86,7 +106,7 @@ def fetch_data_node(state: StockAnalysisState):
+     
+     log_content_accumulator += log_entry
+         
+-    return {"company_name": company_name, "file_data": file_data, "peer_data": peer_data, "log_file_content": log_content_accumulator}
++    return {"company_name": company_name, "file_data": file_data, "peer_data": peer_data, "sector": sector, "log_file_content": log_content_accumulator}
+ 
+ def quantitative_analysis_node(state: StockAnalysisState):
+     excel_data = state['file_data'].get('excel')
+@@ -180,7 +200,9 @@ def valuation_analysis_node(state: StockAnalysisState):
+     
+     results = execute_with_fallback(
+         run_valuation_analysis, log_content_accumulator, "Valuation",
+-        ticker, company_name, peer_data, config
++        ticker, company_name, peer_data, config, state.get('sector'),
++        quant_context=state.get('quant_text_for_synthesis', ''),
++        strategy_context=state.get('strategy_results', '')
+     )
+     
+     content = results.get("content", "No valuation analysis generated.") if isinstance(results, dict) else str(results)
+@@ -308,11 +330,19 @@ def sebi_check_node(state: StockAnalysisState):
+ # ==============================================================================
+ 
+ def screener_latest_transcript_node(state: StockAnalysisState):
+-    """Downloads ONLY the latest transcript."""
++    """Downloads ONLY the latest transcript, or uses a manual upload."""
+     ticker = state['ticker']
+     config = state['agent_config']
+     log_content_accumulator = state.get('log_file_content', "")
+ 
++    # Check for manually uploaded file
++    if state.get("file_data") and state["file_data"].get("latest_transcript"):
++        company_name = state.get("company_name", ticker)
++        file_data = state["file_data"]
++        log_entry = f"## EARNINGS DECODER: DOWNLOAD\n\n**Latest Transcript**: Provided Manually\n\n---\n"
++        log_content_accumulator += log_entry
++        return {"company_name": company_name, "file_data": file_data, "log_file_content": log_content_accumulator}
++
+     company_name, file_data, _ = download_financial_data(
+         ticker, config, 
+         need_excel=False, 
+@@ -351,11 +381,24 @@ def analyze_latest_transcript_node(state: StockAnalysisState):
+ # ==============================================================================
+ 
+ def screener_both_transcripts_node(state: StockAnalysisState):
+-    """Downloads BOTH latest and previous transcripts."""
++    """Downloads BOTH latest and previous transcripts, or uses manual uploads."""
+     ticker = state['ticker']
+     config = state['agent_config']
+     log_content_accumulator = state.get('log_file_content', "")
+ 
++    # Check for manually uploaded files
++    if state.get("file_data") and (state["file_data"].get("latest_transcript") or state["file_data"].get("previous_transcript")):
++        company_name = state.get("company_name", ticker)
++        file_data = state["file_data"]
++        l_status = "Provided Manually" if file_data.get('latest_transcript') else "Not Provided"
++        p_status = "Provided Manually" if file_data.get('previous_transcript') else "Not Provided"
++
++        log_entry = (f"## STRATEGIC SHIFT: DOWNLOAD\n\n"
++                     f"**Latest Transcript**: {l_status}\n"
++                     f"**Previous Transcript**: {p_status}\n\n---\n")
++        log_content_accumulator += log_entry
++        return {"company_name": company_name, "file_data": file_data, "log_file_content": log_content_accumulator}
++
+     company_name, file_data, _ = download_financial_data(
+         ticker, config, 
+         need_excel=False, 
+@@ -526,22 +569,26 @@ def screener_for_valuation_node(state: StockAnalysisState):
+     config = state['agent_config']
+     log_content_accumulator = state.get('log_file_content', "")
+ 
+-    # Call with minimal requirements: only need_peers is True
+-    company_name, _, peer_data = download_financial_data(
++    # Call with requirements for valuation + its quant/strategy prerequisites
++    company_name, file_buffers, peer_data = download_financial_data(
+         ticker, config, 
+-        need_excel=False, 
++        need_excel=True, 
+         need_transcripts=False, 
+-        need_ppt=False, 
+-        need_peers=True, # Often needed for valuation/quant ratios
++        need_ppt=True, 
++        need_peers=True, # Need peers for relative valuation
+         need_credit_report=False 
+     )
++    sector = file_buffers.get('sector', 'Unknown') if file_buffers else 'Unknown'
+     
+     log_entry = (f"## VALUATION DEEP-DIVE: FETCH for {company_name or ticker}\n"
++                 f"**Sector**: {sector}\n"
+                  f"**Peer Data**: {'Downloaded' if not peer_data.empty else 'Failed/Empty'}\n---\n")
+     
+     return {
+         "company_name": company_name, 
++        "file_data": file_buffers,
+         "peer_data": peer_data, 
++        "sector": sector,
+         "log_file_content": log_content_accumulator + log_entry
+     }
+ 
+@@ -555,7 +602,9 @@ def isolated_valuation_node(state: StockAnalysisState):
+     
+     results = execute_with_fallback(
+         run_valuation_analysis, log_content_accumulator, "Valuation (Isolated)",
+-        ticker, company_name, peer_data, config
++        ticker, company_name, peer_data, config, state.get('sector'),
++        quant_context=state.get('quant_text_for_synthesis', ''),
++        strategy_context=state.get('strategy_results', '')
+     )
+     
+     content = results.get("content", "No valuation analysis generated.") if isinstance(results, dict) else str(results)
+diff --git a/quantitative_agent.py b/quantitative_agent.py
+index 2afcdb8..3af18f1 100644
+--- a/quantitative_agent.py
++++ b/quantitative_agent.py
+@@ -350,7 +350,7 @@ def get_analysis_from_gemini(pnl_df, bs_df, cf_df, ticker, opm_table_string, age
+         for attempt in range(max_retries):
+             try:
+                 logger.info(f"--- Calling Gemini for Quantitative Analysis of {ticker} (Attempt {attempt + 1}) ---")
+-                response = model.generate_content(prompt)
++                response = model.generate_content(prompt, request_options={"timeout": 600})
+                 logger.info(f"--- Finished Gemini Call for {ticker} ---")
+                 return response.text
+             
+diff --git a/screener_handler.py b/screener_handler.py
+index 0e975f7..68c31d6 100644
+--- a/screener_handler.py
++++ b/screener_handler.py
+@@ -1,14 +1,13 @@
++import asyncio
++import io
+ import time
+ import random
+-import pandas as pd
+-import io
+ import logging
+-import undetected_chromedriver as uc
++import platform
++import threading
++import pandas as pd
+ from bs4 import BeautifulSoup
+-from selenium.webdriver.common.by import By
+-from selenium.webdriver.support.ui import WebDriverWait
+-from selenium.webdriver.support import expected_conditions as EC
+-from selenium.common.exceptions import TimeoutException, NoSuchElementException
++from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+ 
+ # Configure Logger
+ logger = logging.getLogger('screener_handler')
+@@ -21,28 +20,20 @@ if not logger.handlers:
+ 
+ class ScreenerHandler:
+     def __init__(self):
+-        # 1. SETUP OPTIONS
+-        self.options = uc.ChromeOptions()
+-        self.options.add_argument("--window-size=1920,1080")
+-        self.options.add_argument("--no-sandbox")
+-        self.options.add_argument("--disable-dev-shm-usage")
+-        
+-        my_user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+-        self.options.add_argument(f'--user-agent={my_user_agent}')
+-        
+-        # Uncomment to run invisible
+-        self.options.add_argument("--headless=new")
++        # Playwright setup happens directly in async contexts
++        pass
+ 
+-    def _login(self, driver, email, password):
++    async def _login_async(self, page, email, password):
+         """Performs login to ensure custom columns are visible."""
+         try:
+             logger.info("🔐 Logging in to access custom columns...")
+-            driver.get("https://www.screener.in/login/")
+-            wait = WebDriverWait(driver, 15)
+-            wait.until(EC.visibility_of_element_located((By.ID, "id_username"))).send_keys(email)
+-            wait.until(EC.visibility_of_element_located((By.ID, "id_password"))).send_keys(password)
+-            driver.find_element(By.XPATH, "//button[@type='submit']").click()
+-            wait.until(EC.presence_of_element_located((By.XPATH, "//input[@placeholder='Search for a company']")))
++            await page.goto("https://www.screener.in/login/", wait_until="domcontentloaded")
++            await page.wait_for_selector("#id_username", timeout=15000)
++            await page.fill("#id_username", email)
++            await page.fill("#id_password", password)
++            await page.click("button[type='submit']")
++            await page.wait_for_url(lambda url: "/login/" not in url, timeout=20000)
++            await page.wait_for_load_state("domcontentloaded")
+             logger.info("✅ Login Successful.")
+             return True
+         except Exception as e:
+@@ -60,104 +51,141 @@ class ScreenerHandler:
+         except ValueError:
+             return 0.0
+ 
+-    def fetch_wrapper_data(self, start_url, email=None, password=None):
+-        """
+-        Harvests data and Maps Names to Ticker IDs robustly.
+-        """
+-        driver = None
++    async def _fetch_wrapper_data_async(self, start_url, email=None, password=None):
++        logger.info(f"Starting Harvest: {start_url}")
+         all_dfs = []
+         page_num = 1
+         
+-        logger.info(f"Starting Harvest: {start_url}")
+-        
+-        try:
+-            driver = uc.Chrome(options=self.options, use_subprocess=True, version_main=142)
+-            wait = WebDriverWait(driver, 20)
+-            
+-            if email and password:
+-                if not self._login(driver, email, password):
+-                    return pd.DataFrame(), "Login Failed."
+-
+-            driver.get(start_url)
+-            time.sleep(3)
++        async with async_playwright() as p:
++            launch_args = [
++                "--no-sandbox",
++                "--disable-dev-shm-usage",
++                "--disable-gpu",
++                "--window-size=1920,1080",
++            ]
++            executable_path = "/usr/bin/chromium" if platform.system() == "Linux" else None
++            browser = await p.chromium.launch(
++                headless=True,
++                args=launch_args,
++                executable_path=executable_path,
++            )
++            context = await browser.new_context(
++                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
++                viewport={"width": 1920, "height": 1080},
++            )
++            page = await context.new_page()
+ 
+-            # --- HEADER EXTRACTION ---
+             try:
+-                header_element = driver.find_element(By.TAG_NAME, "h1")
+-                screen_name = header_element.text.strip()
+-                logger.info(f"🎯 PROCESSING TARGET: '{screen_name}'")
+-            except:
+-                logger.info("🎯 PROCESSING TARGET: Unknown (Header not found)")
+-            # -------------------------
++                if email and password:
++                    success = await self._login_async(page, email, password)
++                    if not success:
++                        return pd.DataFrame(), "Login Failed."
++
++                await page.goto(start_url, wait_until="domcontentloaded")
++                await asyncio.sleep(1)
+ 
+-            while True:
++                # --- HEADER EXTRACTION ---
+                 try:
+-                    # 1. Parse HTML Source
+-                    source = driver.page_source
+-                    soup = BeautifulSoup(source, "html.parser")
+-                    
+-                    # 2. Extract Data via Pandas
+-                    tables = pd.read_html(io.StringIO(source))
+-                    if tables:
+-                        df = tables[0]
+-                        df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
+-                        if 'S.No.' in df.columns: df = df.drop(columns=['S.No.'])
+-                        
+-                        # 3. ROBUST TICKER EXTRACTION (The Fix)
+-                        # Create a Dictionary Map: { "Company Name": "TickerID" }
+-                        name_to_id = {}
+-                        
+-                        # Find all rows in the table body
+-                        rows = soup.select("table tbody tr")
+-                        
+-                        for row in rows:
+-                            # Find the company link
+-                            link = row.select_one("a[href*='/company/']")
+-                            if link:
+-                                name_text = link.get_text(strip=True)
+-                                href = link['href']
+-                                # Extract ID from href (e.g., /company/531727/)
+-                                parts = href.split('/')
+-                                if len(parts) > 2:
+-                                    # parts[2] is the ID
+-                                    name_to_id[name_text] = parts[2]
++                    header_element = page.locator("h1").first
++                    screen_name = (await header_element.inner_text()).strip()
++                    logger.info(f"🎯 PROCESSING TARGET: '{screen_name}'")
++                except:
++                    logger.info("🎯 PROCESSING TARGET: Unknown (Header not found)")
++                # -------------------------
++
++                while True:
++                    try:
++                        # 1. Parse HTML Source
++                        source = await page.content()
++                        soup = BeautifulSoup(source, "html.parser")
+                         
+-                        # Apply the map to the DataFrame
+-                        # We look up the Name in the dictionary. If not found, fallback to Name.
+-                        # df.iloc[:, 0] is assumed to be the Name column
+-                        df['TickerID'] = df.iloc[:, 0].apply(lambda x: name_to_id.get(str(x).strip(), x))
++                        # 2. Extract Data via Pandas
++                        tables = pd.read_html(io.StringIO(source))
++                        if tables:
++                            df = tables[0]
++                            df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
++                            if 'S.No.' in df.columns: df = df.drop(columns=['S.No.'])
++                            
++                            # 3. ROBUST TICKER EXTRACTION
++                            name_to_id = {}
++                            rows = soup.select("table tbody tr")
++                            for row in rows:
++                                link = row.select_one("a[href*='/company/']")
++                                if link:
++                                    name_text = link.get_text(strip=True)
++                                    href = link['href']
++                                    parts = href.split('/')
++                                    if len(parts) > 2:
++                                        name_to_id[name_text] = parts[2]
+                             
+-                        all_dfs.append(df)
+-                        logger.info(f"   ✅ Page {page_num} scraped ({len(df)} rows)")
+-                    else:
+-                        logger.warning(f"   ⚠️ No table found on Page {page_num}")
++                            df['TickerID'] = df.iloc[:, 0].apply(lambda x: name_to_id.get(str(x).strip(), x))
++                                
++                            all_dfs.append(df)
++                            logger.info(f"   ✅ Page {page_num} scraped ({len(df)} rows)")
++                        else:
++                            logger.warning(f"   ⚠️ No table found on Page {page_num}")
+ 
+-                    # 4. Pagination
+-                    try:
+-                        next_btn = driver.find_element(By.XPATH, "//div[@class='pagination']//a[contains(text(), 'Next')]")
+-                        next_btn.click()
+-                        page_num += 1
+-                        time.sleep(random.uniform(2.0, 4.0))
+-                    except NoSuchElementException:
+-                        logger.info("   🛑 Reached last page.")
++                        # 4. Pagination
++                        try:
++                            next_btn = page.locator("div.pagination a:has-text('Next')")
++                            if await next_btn.count() > 0:
++                                await next_btn.first.click()
++                                await page.wait_for_load_state("domcontentloaded")
++                                page_num += 1
++                                await asyncio.sleep(random.uniform(1.0, 2.5))
++                            else:
++                                logger.info("   🛑 Reached last page.")
++                                break
++                        except Exception:
++                            logger.info("   🛑 Reached last page (error clicking next).")
++                            break
++                            
++                    except Exception as e:
++                        logger.error(f"   ⚠️ Error processing page {page_num}: {e}")
+                         break
+-                        
+-                except Exception as e:
+-                    logger.error(f"   ⚠️ Error processing page {page_num}: {e}")
+-                    break
+-        
+-        except Exception as e:
+-            logger.error(f"Critical Harvest Error: {e}")
+-        finally:
+-            if driver:
+-                driver.quit()
+-        
++            
++            except Exception as e:
++                logger.error(f"Critical Harvest Error: {e}")
++            finally:
++                await context.close()
++                await browser.close()
++            
+         if not all_dfs:
+             return pd.DataFrame(), "No data found."
+             
+         full_df = pd.concat(all_dfs, ignore_index=True)
+         return full_df, None
+ 
++    def fetch_wrapper_data(self, start_url, email=None, password=None):
++        """Synchronous wrapper to run async Playwright safely in Streamlit/Windows."""
++        result_container = [None, None]
++        exception_container = [None]
++
++        def run_in_thread():
++            if platform.system() == "Windows":
++                loop = asyncio.ProactorEventLoop()
++            else:
++                loop = asyncio.new_event_loop()
++            asyncio.set_event_loop(loop)
++            try:
++                out_df, msg = loop.run_until_complete(self._fetch_wrapper_data_async(start_url, email, password))
++                result_container[0] = out_df
++                result_container[1] = msg
++            except Exception as e:
++                exception_container[0] = e
++            finally:
++                loop.close()
++
++        thread = threading.Thread(target=run_in_thread, daemon=True)
++        thread.start()
++        thread.join()
++
++        if exception_container[0]:
++            logger.error(f"Thread Error: {exception_container[0]}")
++            return pd.DataFrame(), str(exception_container[0])
++
++        return result_container[0], result_container[1]
++
+     def filter_survivors(self, df):
+         """
+         Gatekeeper Logic: Applies Financial Filters + Market Cap > 500Cr
+@@ -179,8 +207,9 @@ class ScreenerHandler:
+             elif 'cmp' in c_low and '/' not in c_low: col_map['Price'] = col
+             elif 'mar' in c_low and 'cap' in c_low: col_map['Market Cap'] = col
+             elif 'tickerid' in c_low: col_map['TickerID'] = col
++            elif 'opm' in c_low: col_map['OPM'] = col
+ 
+-        required = ['Pledge', 'D/E', 'ROCE', 'PEG', 'TickerID', 'Market Cap']
++        required = ['Pledge', 'D/E', 'ROCE', 'PEG', 'TickerID', 'Market Cap', 'OPM', 'FCF']
+         missing = [k for k in required if k not in col_map]
+         
+         if missing:
+@@ -192,8 +221,6 @@ class ScreenerHandler:
+             if key not in ['Name', 'TickerID']:
+                 clean_df[orig] = clean_df[orig].apply(self._clean_numeric)
+ 
+-        fcf_mask = (clean_df[col_map['FCF']] > 0) if 'FCF' in col_map else True
+-
+         # 3. Apply Filters
+         mask = (
+             (clean_df[col_map['Pledge']] <= 0.1) & 
+@@ -202,7 +229,10 @@ class ScreenerHandler:
+             (clean_df[col_map['PEG']] > 0.0) & 
+             (clean_df[col_map['PEG']] < 2.0) & 
+             (clean_df[col_map['Market Cap']] > 500.0) & 
+-            fcf_mask
++            (clean_df[col_map['OPM']] > 15.0) &
++            (clean_df[col_map['FCF']] > 0)
++ #           (clean_df[col_map['FCF']] > 0) &
++ #           (clean_df[col_map['Market Cap']] < 20 * clean_df[col_map['FCF']])
+         )
+         
+         survivors = clean_df[mask].copy()
+@@ -210,25 +240,51 @@ class ScreenerHandler:
+         rename_dict = {v: k for k, v in col_map.items()}
+         survivors = survivors.rename(columns=rename_dict)
+         
+-        final_cols = ['Name', 'TickerID', 'Price', 'Market Cap', 'PEG', 'ROCE', 'D/E', 'Pledge', 'FCF']
++        final_cols = ['Name', 'TickerID', 'Price', 'Market Cap', 'PEG', 'ROCE', 'D/E', 'Pledge', 'OPM', 'FCF']
+         available = [c for c in final_cols if c in survivors.columns]
+         
+         return survivors[available], f"Found {len(survivors)} qualifiers."
+ 
+-    def get_company_description(self, ticker_name):
+-        driver = None
+-        try:
+-            driver = uc.Chrome(options=self.options, use_subprocess=True, version_main=142)
+-            slug = ticker_name.replace(' ', '-').replace('.', '').replace('(', '').replace(')', '').lower()
+-            url = f"https://www.screener.in/company/{slug}/"
+-            driver.get(url)
+-            time.sleep(2)
++    async def _get_company_description_async(self, ticker_name):
++        async with async_playwright() as p:
++            launch_args = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--window-size=1920,1080"]
++            executable_path = "/usr/bin/chromium" if platform.system() == "Linux" else None
++            browser = await p.chromium.launch(headless=True, args=launch_args, executable_path=executable_path)
++            context = await browser.new_context()
++            page = await context.new_page()
+             try:
+-                about_div = driver.find_element(By.CLASS_NAME, 'about-company')
+-                return about_div.text[:400] + "..."
++                slug = ticker_name.replace(' ', '-').replace('.', '').replace('(', '').replace(')', '').lower()
++                url = f"https://www.screener.in/company/{slug}/"
++                await page.goto(url, wait_until="domcontentloaded")
++                about_div = page.locator('.about-company')
++                if await about_div.count() > 0:
++                    text = await about_div.first.inner_text()
++                    return text[:400] + "..."
++                return "Description unavailable."
+             except:
+                 return "Description unavailable."
+-        except:
+-            return "Description unavailable."
+-        finally:
+-            if driver: driver.quit()
+\ No newline at end of file
++            finally:
++                await context.close()
++                await browser.close()
++
++    def get_company_description(self, ticker_name):
++        """Synchronous wrapper to run async Playwright safely in Streamlit/Windows."""
++        result_container = ["Description unavailable."]
++        def run_in_thread():
++            if platform.system() == "Windows":
++                loop = asyncio.ProactorEventLoop()
++            else:
++                loop = asyncio.new_event_loop()
++            asyncio.set_event_loop(loop)
++            try:
++                desc = loop.run_until_complete(self._get_company_description_async(ticker_name))
++                result_container[0] = desc
++            except:
++                pass
++            finally:
++                loop.close()
++        
++        thread = threading.Thread(target=run_in_thread, daemon=True)
++        thread.start()
++        thread.join()
++        return result_container[0]
+diff --git a/state.py b/state.py
+index a014b4a..7bb2cef 100644
+--- a/state.py
++++ b/state.py
+@@ -1,3 +1,14 @@
++"""
++state.py
++========
++Defines the main TypedDict state representation used throughout LangGraph workflows.
++
++CHANGE LOG
++----------
++[2026-03-09] Dynamic Sector-Specific Valuation
++  - Added `sector: str | None` property to `StockAnalysisState` to route scraped sector values.
++"""
++
+ import io
+ from typing import TypedDict, Dict, Any, List, Annotated
+ import pandas as pd
+@@ -6,6 +17,7 @@ import pandas as pd
+ class StockAnalysisState(TypedDict):
+     ticker: str
+     company_name: str | None
++    sector: str | None
+     file_data: Dict[str, io.BytesIO]
+     peer_data: pd.DataFrame | None
+     quant_results_structured: List[Dict[str, Any]] | None
+diff --git a/strategy_agent.py b/strategy_agent.py
+index 4ed63d6..ddd3442 100644
+--- a/strategy_agent.py
++++ b/strategy_agent.py
+@@ -1,3 +1,19 @@
++"""
++strategy_agent.py
++=================
++Agent responsible for analyzing Investor Presentations (PPTs) and Credit Rating 
++Reports to extract strategic insights, management commentary, and risk profiles.
++
++CHANGE LOG
++----------
++[2026-03-09] Sector-Specific KPI Extraction
++  - Updated both One-Shot and Map-Reduce prompts to explicitly require the LLM to 
++    extract "Sector-Specific KPIs (The Hard Numbers)". 
++  - Prevents the Valuation Agent from returning "Data Not Available" for critical 
++    metrics like ARPOB (Hospitals) and NIM (Banks) by forcing the Strategy Agent 
++    to proactively pass those numbers down the chain.
++"""
++
+ import logging
+ import time
+ import random
+@@ -132,10 +148,24 @@ def _map_reduce_strategy(model, ppt_text, credit_text):
+     * **Capex Efficiency:** Is FCF about to explode?
+     * **Hidden Assets:** Land/Brands/Patents.
+ 
+-    ### 4. Strategic Pivot & Future Roadmap
++    ### 3. The "Alpha" Drivers (The Reality Check)
++    *[Adopt skeptical CIO persona. Use the Credit Report to ground the PPT claims]*
++    * **Mix Shift:** High-margin vs low-margin growth.
++    * **Capex Efficiency:** Is FCF about to explode?
++    * **Hidden Assets:** Land/Brands/Patents.
++
++    ### 4. Sector-Specific KPIs (The Hard Numbers)
++    *[Extract the core operational metrics that define this specific industry's health. You MUST include the actual numbers/percentages if present in the PPT.]*
++    * e.g., If Hospital: **ARPOB**, **Occupancy Rate**, **ALOS**.
++    * e.g., If Bank/NBFC: **NIM**, **GNPA**, **Credit Cost**, **AUM Growth**.
++    * e.g., If Auto/Capital Goods: **Order Book**, **Capacity Utilization**, **Volume Growth**.
++    * e.g., If IT/Services: **Attrition Rate**, **TCV (Total Contract Value)**, **Client Additions**.
++    *(List the 3-5 most critical numerical KPIs found in the presentation with their latest values)*
++
++    ### 5. Strategic Pivot & Future Roadmap
+     [Single biggest change in next 3 years based on extracted notes.]
+ 
+-    ### 5. Final Investment Verdict
++    ### 6. Final Investment Verdict
+     * **Bull Case:**
+     * **Bear Case:**
+     """
+@@ -232,10 +262,18 @@ def strategy_analyst_agent(file_buffers, api_key, model_name):
+         * **Capex Efficiency:** Is a big capex cycle finishing? (This means Free Cash Flow is about to explode).
+         * **Hidden Assets:** Land, brands, or patents that the market ignores.
+ 
+-        ### 4. Strategic Pivot & Future Roadmap
++        ### 4. Sector-Specific KPIs (The Hard Numbers)
++        *[Extract the core operational metrics that define this specific industry's health. You MUST include the actual numbers/percentages if present in the PPT.]*
++        * e.g., If Hospital: **ARPOB**, **Occupancy Rate**, **ALOS**.
++        * e.g., If Bank/NBFC: **NIM**, **GNPA**, **Credit Cost**, **AUM Growth**.
++        * e.g., If Auto/Capital Goods: **Order Book**, **Capacity Utilization**, **Volume Growth**.
++        * e.g., If IT/Services: **Attrition Rate**, **TCV (Total Contract Value)**, **Client Additions**.
++        *(List the 3-5 most critical numerical KPIs found in the presentation with their latest values)*
++
++        ### 5. Strategic Pivot & Future Roadmap
+         [What is the *single biggest* change coming in the next 3 years? (e.g., "Entry into EV components" or "Doubling Export capacity"). Use the PPT's "Future Strategy" slides.]
+ 
+-        ### 5. Final Investment Verdict
++        ### 6. Final Investment Verdict
+         * **Bull Case:** [The most optimistic outcome if the strategy works.]
+         * **Bear Case:** [The biggest structural risk identified.]
+         """
+diff --git a/test_wrapper.py b/test_wrapper.py
+index 34469ee..f78e420 100644
+--- a/test_wrapper.py
++++ b/test_wrapper.py
+@@ -5,7 +5,7 @@ from screener_handler import ScreenerHandler
+ # Load environment variables (for credentials)
+ load_dotenv()
+ 
+-target_url = "https://www.screener.in/market/IN04/" 
++target_url = "https://www.screener.in/market/IN08/" 
+ 
+ def run_test():
+     print(f"🚀 Starting Test on: {target_url}\n")
+diff --git a/valuation_agent.py b/valuation_agent.py
+index 3ee3d1b..ac30165 100644
+--- a/valuation_agent.py
++++ b/valuation_agent.py
+@@ -1,3 +1,18 @@
++"""
++valuation_agent.py
++==================
++Agent responsible for performing relative valuation against peer companies.
++
++CHANGE LOG
++----------
++[2026-03-09] Dynamic Sector-Specific Valuation via Skills
++  - Expanded `run_valuation_analysis` to dynamically load sector-specific methodology 
++    using Markdown skill files (`skills_loader.py`).
++  - Added support for fetching and formatting context directly from prior Qualitative 
++    and quantitative analytical extractions.
++  - Added grounding rules to prevent the LLM from hallucinating missing ratios.
++"""
++
+ import logging
+ import pandas as pd
+ import google.generativeai as genai
+@@ -60,43 +75,40 @@ def clean_and_format_peer_data(df: pd.DataFrame) -> str:
+     # 1. Normalize Header: Strip whitespace and newlines
+     df.columns = [str(c).strip().replace('\n', ' ') for c in df.columns]
+ 
+-    # 2. Define Regex Patterns for the columns we need
+-    # Key = Target standardized name, Value = Regex pattern to find it
++    # 2. Define Regex Patterns for the core columns we want standardized
+     column_patterns = {
+         'Company_Name': r'(?i)(name|company)',
+         'Current_Price': r'(?i)(cmp|current\s*price|price)',
+-        'PE_Ratio': r'(?i)(p/e|pe\s*ratio)',
++        'Market_Cap': r'(?i)(mar\s*cap|market\s*cap)',
++        'PE_Ratio': r'(?i)(^p/e$|pe\s*ratio)',
+         'PEG_Ratio': r'(?i)(peg)',
++        'Price_to_Book': r'(?i)(p/b|price\s*to\s*book|cmp\s*/\s*bv)',
++        'EV_to_EBITDA': r'(?i)(ev\s*/\s*ebitda)',
+         'ROCE_Percent': r'(?i)(roce)',
+         'Debt_to_Equity_Ratio': r'(?i)(debt\s*/\s*eq|debt\s*to\s*equity)',
+-        'Promoter_Pledged_Percent': r'(?i)(pledge)',  # Matches "Pledged %", "Promoter Pledged", etc.
++        'Promoter_Pledged_Percent': r'(?i)(pledge)',
+         'Free_Cash_Flow': r'(?i)(free\s*cash\s*flow|fcf)'
+     }
+ 
+-    selected_cols = []
+     rename_dict = {}
+ 
+     # 3. Scan columns using Regex
+     for col in df.columns:
+         for target_name, pattern in column_patterns.items():
+-            if re.search(pattern, col):
+-                # Only add if we haven't found this target yet (prioritizing first match)
+-                if target_name not in rename_dict.values():
+-                    selected_cols.append(col)
+-                    rename_dict[col] = target_name
++            if re.search(pattern, col) and target_name not in rename_dict.values():
++                rename_dict[col] = target_name
++                break # Move to next column once matched
+     
+     # 4. Filter and Rename
+     try:
+-        # Create a copy with only the found columns
+-        clean_df = df[selected_cols].copy()
+-        clean_df.rename(columns=rename_dict, inplace=True)
++        # KEEP ALL COLUMNS, just rename the known ones so custom metrics stay available
++        clean_df = df.rename(columns=rename_dict)
+         
+         # 5. Fill NaNs to avoid markdown errors
+         clean_df.fillna(0, inplace=True)
+         
+-        # DEBUG: Log what we found so we know if "Pledge" was detected
+-        found_cols = clean_df.columns.tolist()
+-        logger.info(f"Columns extracted for LLM: {found_cols}")
++        # DEBUG: Log what we found
++        logger.info(f"Columns extracted for LLM (including custom): {clean_df.columns.tolist()}")
+         
+         return clean_df.head(15).to_markdown(index=False)
+         
+@@ -104,9 +116,11 @@ def clean_and_format_peer_data(df: pd.DataFrame) -> str:
+         logger.warning(f"Column cleaning failed: {e}. Falling back to raw data.")
+         return df.head(15).to_markdown(index=False)
+ 
+-def run_valuation_analysis(ticker: str, company_name: str, peer_df: pd.DataFrame, agent_config: dict) -> Dict[str, Any]:
++def run_valuation_analysis(ticker: str, company_name: str, peer_df: pd.DataFrame, agent_config: dict, sector: str = None, **kwargs) -> Dict[str, Any]:
+     """
+     Analyzes the company valuation relative to peers using Gemini.
++    Loads sector-specific valuation methodology from Skills .md files.
++    Accepts optional quant_context and strategy_context for richer analysis.
+     """
+     logger.info(f"--- Starting Valuation Analysis for {ticker} ({company_name}) ---")
+ 
+@@ -120,6 +134,10 @@ def run_valuation_analysis(ticker: str, company_name: str, peer_df: pd.DataFrame
+     if not api_key:
+         return {"content": "ERROR: Google API Key missing for Valuation Agent."}
+ 
++    # Extract optional context from kwargs
++    quant_context = kwargs.get('quant_context', '')
++    strategy_context = kwargs.get('strategy_context', '')
++
+     try:
+         genai.configure(api_key=api_key)
+         model = genai.GenerativeModel(model_name)
+@@ -127,40 +145,83 @@ def run_valuation_analysis(ticker: str, company_name: str, peer_df: pd.DataFrame
+         # --- CLEANING STEP ---
+         peer_markdown = clean_and_format_peer_data(peer_df)
+         # ---------------------
++
++        # --- SKILL LOADING ---
++        from skills_loader import load_skill_for_sector
++        skill_content, skill_file = load_skill_for_sector(sector or "Unknown")
++        logger.info(f"📚 Using valuation skill: {skill_file} (sector: {sector or 'Unknown'})")
++        # ---------------------
+         
+         target_identifier = company_name if company_name else ticker
++        sector_label = sector if sector and sector != "Unknown" else "General"
++
++        # --- BUILD OPTIONAL CONTEXT SECTIONS ---
++        additional_context = ""
++        if quant_context and quant_context.strip():
++            additional_context += f"""
++        **Target Company Financial Summary (from Quantitative Analysis):**
++        This contains revenue trends, margins, debt levels, and cash flow data for {target_identifier}.
++        {quant_context}
++        """
++            logger.info("📊 Quant context injected into valuation prompt.")
++
++        if strategy_context and strategy_context.strip():
++            additional_context += f"""
++        **Target Company Strategy & Sector KPIs (from Investor Presentation):**
++        This may contain sector-specific operational metrics (e.g., NIM for banks, ARPOB for hospitals, order book for equipment companies).
++        {strategy_context}
++        """
++            logger.info("🎯 Strategy context injected into valuation prompt.")
+ 
+         prompt = f"""
+-        You are a Valuation Expert. Your goal is to perform a "Relative Valuation Analysis" for the target company: **{target_identifier}** (Ticker: {ticker}).
++        You are a Valuation Expert specializing in the **{sector_label}** sector.
++        Your goal is to perform a "Relative Valuation Analysis" for the target company: **{target_identifier}** (Ticker: {ticker}).
++
++        **SECTOR-SPECIFIC VALUATION METHODOLOGY:**
++        {skill_content}
+ 
+-        **Cleaned Peer Data:**
++        **Cleaned Peer Data (Comparative):**
+         {peer_markdown}
++        {additional_context}
+ 
+         **CRITICAL INSTRUCTIONS:**
+         
+-        1. **Identify the Target:** Locate the row in the table where 'Company_Name' matches **{target_identifier}**.
++        1. **Identify the Target:** Locate the row in the table where 'Company_Name' closely matches or is a substring of **{target_identifier}**. Do NOT demand an exact string match (e.g., "Cello World" matches "Cello World Ltd").
+         
+         2. **Identify Direct Competitors:** Select 3-5 closest peers from the list.
+         
+-        3. **GOVERNANCE CHECK (Strict):**
++        3. **SECTOR-SPECIFIC METRIC CHECK (MANDATORY):**
++           - First, print a header exactly like this: `### {sector_label} Sector Specific Valuation Check`
++           - Then, you MUST create a **Markdown Table** evaluating EVERY SINGLE metric requested in the "Core Financials" and "Strategy & Narrative KPIs" sections of the Sector Methodology above.
++           - The table MUST have these exact columns: | Metric | Value | Sector Benchmark/Rule | Assessment |
++           - **CRITICAL MATH RULE:** When evaluating metrics like CFO/PAT, Growth Rates, or Margins, you MUST extract the exact numbers already calculated for you in the "Target Company Financial Summary" context text. DO NOT perform your own mathematical calculations from raw tables. Look for the summarized ratios already provided.
++           - The 'Assessment' column should contain a brief, punchy qualitative takeaway (e.g., "Weak; significant margin erosion" or "Strong; indicates asset efficiency"). Do not write long paragraphs.
++           - If a metric is not found in the context after strict searching, you MUST NOT skip it. You MUST list it and state: "**Data Not Available** — verify from company filings."
++        
++        4. **GOVERNANCE CHECK (Strict):**
+            - Look specifically at the column **'Promoter_Pledged_Percent'**.
+            - **DO NOT** confuse this with 'Debt_to_Equity_Ratio'.
+            - If 'Promoter_Pledged_Percent' is 0 or 0.00, the company has NO pledging issues.
+            - Only flag a "RED FLAG" if 'Promoter_Pledged_Percent' is > 0.
+ 
+-        4. **VALUATION METRICS TABLE:**
++        5. **VALUATION METRICS TABLE:**
+            - Create a comparison table including **{target_identifier} AND Selected Peers**. 
+-           - Columns: Name, Current_Price, PE_Ratio, PEG_Ratio, ROCE_Percent, Debt_to_Equity_Ratio, Promoter_Pledged_Percent.
++           - Use the sector-specific metrics from the methodology above as your primary columns.
++           - Also include: Name, Current_Price, Promoter_Pledged_Percent.
+            
+-           **Analysis Rules:**
+-           - **PEG Ratio:** < 2.0 is "Undervalued".
+-           - **Debt/Eq:** > 1.0 indicates high leverage.
+-           - **Pledged %:** High pledging is a severe governance risk.
++           Apply the sector-specific analysis rules from the methodology above.
+ 
+-        5. **Valuation Verdict:**
++        6. **Valuation Verdict:**
+            - Compare **{target_identifier}** metrics against the average of its Peers.
++           - Apply the sector-specific rules to arrive at a final classification.
+            - Final Classification: "Undervalued", "Fairly Valued", or "Overvalued".
+         
++        **⚠️ GROUNDING CONSTRAINT:**
++        - You MUST ONLY cite values and metrics that are explicitly present in the data provided above (Peer Table, Financial Summary, or Strategy/PPT data).
++        - **Synonym Mapping Allowed:** If a metric is requested (e.g., 'EBITDA Margin', 'Revenue Growth') but the provided data uses a synonymous term (e.g., 'OPM', 'Sales Growth'), you MUST use that data. Do not say it's unavailable if the concept exists.
++        - If a metric mentioned in the Sector Methodology is genuinely NOT present in any of the provided data, explicitly state: "**[Metric Name]: Data Not Available** — verify from company filings."
++        - Do NOT infer, estimate, or recall metric values from your training knowledge. Only use what is given.
++        
+         Format your response in clean Markdown.
+         """
+ 
+@@ -170,7 +231,9 @@ def run_valuation_analysis(ticker: str, company_name: str, peer_df: pd.DataFrame
+         
+         return {
+             "content": response.text,
+-            "peer_comparison_table": peer_df # Return raw DF for UI rendering
++            "peer_comparison_table": peer_df, # Return raw DF for UI rendering
++            "sector": sector or "Unknown",
++            "skill_file_used": skill_file
+         }
+ 
+     except Exception as e:

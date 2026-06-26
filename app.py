@@ -8,6 +8,10 @@ the LangGraph-based analysis pipeline.
 
 CHANGE LOG
 ----------
+[2026-03-09] Dynamic Sector-Specific Valuation
+  - Integrated "⚙️ Valuation Skills Editor" in the sidebar for managing sector skills.
+  - Valuation node now receives expanded context, including 'quant_text_for_synthesis' and 'strategy_results'.
+
 [2026-03-08] Dynamic QoQ table column headers
   - QoQ comparison table now reads column names from the LLM's JSON output
     instead of using hardcoded "Latest/Previous Quarter Analysis" keys.
@@ -199,7 +203,7 @@ def cleanup_checkpoint(ticker_symbol, workflow_mode):
         pass  # Non-critical — don't break the app if cleanup fails
 
 # --- Runner Function ---
-def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_container, progress_text_container, workflow_mode, resume_mode=False):
+def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_container, progress_text_container, workflow_mode, resume_mode=False, manual_files=None):
     # Deterministic thread ID: same ticker + workflow always maps to same thread
     thread_id = f"{ticker_symbol}-{workflow_mode.replace(' ', '_').replace('(', '').replace(')', '')}"
     stream_config = {"configurable": {"thread_id": thread_id}}
@@ -212,6 +216,9 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
         "agent_config": agent_configs,
         "workflow_mode": workflow_mode
     }
+    
+    if manual_files:
+        fresh_inputs["file_data"] = manual_files
     
     # Select target graph first (needed for checkpoint lookup)
     graph_map = {
@@ -603,6 +610,21 @@ workflow_mode = st.sidebar.selectbox(
 )
 # ------------------------------------
 
+manual_transcript_upload = False
+latest_transcript_file = None
+previous_transcript_file = None
+
+if workflow_mode == "QoQ Concall Analysis":
+    manual_transcript_upload = st.sidebar.checkbox("Manually Upload Transcripts", help="Bypass screener download and manually provide transcripts.")
+    if manual_transcript_upload:
+        latest_transcript_file = st.sidebar.file_uploader("Upload Latest Quarter Transcript (PDF)", type=['pdf'])
+        previous_transcript_file = st.sidebar.file_uploader("Upload Previous Quarter Transcript (PDF)", type=['pdf'])
+
+elif workflow_mode == "Latest Concall Analysis":
+    manual_transcript_upload = st.sidebar.checkbox("Manually Upload Transcript", help="Bypass screener download and manually provide a transcript.")
+    if manual_transcript_upload:
+        latest_transcript_file = st.sidebar.file_uploader("Upload Transcript (PDF)", type=['pdf'])
+
 analysis_mode = st.sidebar.radio("Analysis Mode", ["Single Ticker", "Batch Analysis"])
 
 tickers_to_process = []
@@ -627,6 +649,70 @@ resume_mode = st.sidebar.checkbox("🔄 Resume from checkpoint", value=False,
 if st.sidebar.button("🗑️ Clear Results"):
     st.session_state.analysis_results = {}
     st.rerun()
+
+# --- VALUATION SKILLS EDITOR ---
+from skills_loader import list_skills, read_skill, save_skill, create_skill, delete_skill
+
+with st.sidebar.expander("⚙️ Valuation Skills Editor", expanded=False):
+    all_skills = list_skills()
+    if all_skills:
+        skill_names = [s['filename'] for s in all_skills]
+        selected_skill = st.selectbox("Select Skill", skill_names, key="skill_selector")
+
+        # Load and display content
+        try:
+            skill_content = read_skill(selected_skill)
+            edited_content = st.text_area(
+                "Edit Skill Content",
+                value=skill_content,
+                height=300,
+                key="skill_editor"
+            )
+
+            col_save, col_del = st.columns(2)
+            with col_save:
+                if st.button("💾 Save", key="save_skill"):
+                    try:
+                        save_skill(selected_skill, edited_content)
+                        st.success(f"Saved {selected_skill}")
+                    except Exception as e:
+                        st.error(str(e))
+            with col_del:
+                if st.button("🗑️ Delete", key="del_skill",
+                             disabled=(selected_skill == "_default.md")):
+                    try:
+                        delete_skill(selected_skill)
+                        st.success(f"Deleted {selected_skill}")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
+
+            # Show which sectors this skill matches
+            skill_info = next((s for s in all_skills if s['filename'] == selected_skill), None)
+            if skill_info and skill_info['sector_aliases']:
+                st.caption(f"**Matches**: {', '.join(skill_info['sector_aliases'])}")
+
+        except Exception as e:
+            st.error(f"Could not load skill: {e}")
+
+        # Create New
+        st.markdown("---")
+        st.markdown("**Create New Skill**")
+        new_name = st.text_input("Filename (e.g. real_estate.md)", key="new_skill_name")
+        new_content = st.text_area("Content", height=150, key="new_skill_content",
+                                   placeholder="---\nsector_aliases:\n  - \"Real Estate\"\n---\n# Real Estate Valuation Skill\n...")
+        if st.button("✨ Create", key="create_skill"):
+            if new_name and new_content:
+                try:
+                    create_skill(new_name, new_content)
+                    st.success(f"Created {new_name}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+            else:
+                st.warning("Provide both filename and content.")
+    else:
+        st.warning("No skills found. Create your first skill below.")
 
 if st.sidebar.button("🚀 Run Analysis", type="primary"):
     if not tickers_to_process:
@@ -653,7 +739,19 @@ if st.sidebar.button("🚀 Run Analysis", type="primary"):
                     progress_text = st.empty()
                     
                     # Pass workflow_mode to runner
-                    result_state = run_analysis_for_ticker(ticker, is_consolidated, status, progress_text, workflow_mode, resume_mode)
+                    manual_files = None
+                    if workflow_mode == "QoQ Concall Analysis" and manual_transcript_upload:
+                        manual_files = {}
+                        if latest_transcript_file:
+                            manual_files["latest_transcript"] = io.BytesIO(latest_transcript_file.getvalue())
+                        if previous_transcript_file:
+                            manual_files["previous_transcript"] = io.BytesIO(previous_transcript_file.getvalue())
+                    elif workflow_mode == "Latest Concall Analysis" and manual_transcript_upload:
+                        manual_files = {}
+                        if latest_transcript_file:
+                            manual_files["latest_transcript"] = io.BytesIO(latest_transcript_file.getvalue())
+
+                    result_state = run_analysis_for_ticker(ticker, is_consolidated, status, progress_text, workflow_mode, resume_mode, manual_files)
                     
                     # 3. INCREMENTAL COMMIT (Save immediately)
                     st.session_state.analysis_results[ticker] = result_state

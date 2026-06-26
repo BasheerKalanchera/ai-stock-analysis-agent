@@ -1,3 +1,21 @@
+"""
+nodes.py
+========
+Contains all LangGraph nodes for the stock analysis workflows.
+
+CHANGE LOG
+----------
+[2026-03-09] Standalone Valuation Deep-Dive Fix
+  - Updated `screener_for_valuation_node` to download `need_excel=True` and `need_ppt=True`.
+  - Updated `isolated_valuation_node` to pass the `quant_context` and `strategy_context` to
+    the core valuation analysis function, ensuring the standalone graph supports grounding.
+
+[2026-03-09] Dynamic Sector-Specific Valuation
+  - Re-wired `fetch_data_node` and all valuation-related nodes to pass the `sector` attribute.
+  - Updated `valuation_analysis_node` to pass combined output from Quantitative and Strategy agents 
+    (quant_context & strategy_context) as extra arguments to ground the valuation agent.
+"""
+
 import datetime
 import io
 import time
@@ -75,9 +93,11 @@ def fetch_data_node(state: StockAnalysisState):
     
     timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     peer_status = "Downloaded" if not peer_data.empty else "Not Found/Failed"
+    sector = file_data.get('sector', 'Unknown') if file_data else 'Unknown'
     
     log_entry = (f"## AGENT 1: DOWNLOAD SUMMARY for {company_name or ticker}\n\n"
                  f"**Timestamp**: {timestamp_str}\n\n"
+                 f"**Sector**: {sector}\n\n"
                  f"**Excel Data**: {'Downloaded' if file_data.get('excel') else 'Failed'}\n\n"
                  f"**Peer Data**: {peer_status}\n\n"
                  f"**Latest Transcript**: {'Downloaded' if file_data.get('latest_transcript') else 'Failed'}\n\n"
@@ -86,7 +106,7 @@ def fetch_data_node(state: StockAnalysisState):
     
     log_content_accumulator += log_entry
         
-    return {"company_name": company_name, "file_data": file_data, "peer_data": peer_data, "log_file_content": log_content_accumulator}
+    return {"company_name": company_name, "file_data": file_data, "peer_data": peer_data, "sector": sector, "log_file_content": log_content_accumulator}
 
 def quantitative_analysis_node(state: StockAnalysisState):
     excel_data = state['file_data'].get('excel')
@@ -180,7 +200,9 @@ def valuation_analysis_node(state: StockAnalysisState):
     
     results = execute_with_fallback(
         run_valuation_analysis, log_content_accumulator, "Valuation",
-        ticker, company_name, peer_data, config
+        ticker, company_name, peer_data, config, state.get('sector'),
+        quant_context=state.get('quant_text_for_synthesis', ''),
+        strategy_context=state.get('strategy_results', '')
     )
     
     content = results.get("content", "No valuation analysis generated.") if isinstance(results, dict) else str(results)
@@ -308,10 +330,18 @@ def sebi_check_node(state: StockAnalysisState):
 # ==============================================================================
 
 def screener_latest_transcript_node(state: StockAnalysisState):
-    """Downloads ONLY the latest transcript."""
+    """Downloads ONLY the latest transcript, or uses a manual upload."""
     ticker = state['ticker']
     config = state['agent_config']
     log_content_accumulator = state.get('log_file_content', "")
+
+    # Check for manually uploaded file
+    if state.get("file_data") and state["file_data"].get("latest_transcript"):
+        company_name = state.get("company_name", ticker)
+        file_data = state["file_data"]
+        log_entry = f"## EARNINGS DECODER: DOWNLOAD\n\n**Latest Transcript**: Provided Manually\n\n---\n"
+        log_content_accumulator += log_entry
+        return {"company_name": company_name, "file_data": file_data, "log_file_content": log_content_accumulator}
 
     company_name, file_data, _ = download_financial_data(
         ticker, config, 
@@ -351,10 +381,23 @@ def analyze_latest_transcript_node(state: StockAnalysisState):
 # ==============================================================================
 
 def screener_both_transcripts_node(state: StockAnalysisState):
-    """Downloads BOTH latest and previous transcripts."""
+    """Downloads BOTH latest and previous transcripts, or uses manual uploads."""
     ticker = state['ticker']
     config = state['agent_config']
     log_content_accumulator = state.get('log_file_content', "")
+
+    # Check for manually uploaded files
+    if state.get("file_data") and (state["file_data"].get("latest_transcript") or state["file_data"].get("previous_transcript")):
+        company_name = state.get("company_name", ticker)
+        file_data = state["file_data"]
+        l_status = "Provided Manually" if file_data.get('latest_transcript') else "Not Provided"
+        p_status = "Provided Manually" if file_data.get('previous_transcript') else "Not Provided"
+
+        log_entry = (f"## STRATEGIC SHIFT: DOWNLOAD\n\n"
+                     f"**Latest Transcript**: {l_status}\n"
+                     f"**Previous Transcript**: {p_status}\n\n---\n")
+        log_content_accumulator += log_entry
+        return {"company_name": company_name, "file_data": file_data, "log_file_content": log_content_accumulator}
 
     company_name, file_data, _ = download_financial_data(
         ticker, config, 
@@ -526,22 +569,26 @@ def screener_for_valuation_node(state: StockAnalysisState):
     config = state['agent_config']
     log_content_accumulator = state.get('log_file_content', "")
 
-    # Call with minimal requirements: only need_peers is True
-    company_name, _, peer_data = download_financial_data(
+    # Call with requirements for valuation + its quant/strategy prerequisites
+    company_name, file_buffers, peer_data = download_financial_data(
         ticker, config, 
-        need_excel=False, 
+        need_excel=True, 
         need_transcripts=False, 
-        need_ppt=False, 
-        need_peers=True, # Often needed for valuation/quant ratios
+        need_ppt=True, 
+        need_peers=True, # Need peers for relative valuation
         need_credit_report=False 
     )
+    sector = file_buffers.get('sector', 'Unknown') if file_buffers else 'Unknown'
     
     log_entry = (f"## VALUATION DEEP-DIVE: FETCH for {company_name or ticker}\n"
+                 f"**Sector**: {sector}\n"
                  f"**Peer Data**: {'Downloaded' if not peer_data.empty else 'Failed/Empty'}\n---\n")
     
     return {
         "company_name": company_name, 
+        "file_data": file_buffers,
         "peer_data": peer_data, 
+        "sector": sector,
         "log_file_content": log_content_accumulator + log_entry
     }
 
@@ -555,7 +602,9 @@ def isolated_valuation_node(state: StockAnalysisState):
     
     results = execute_with_fallback(
         run_valuation_analysis, log_content_accumulator, "Valuation (Isolated)",
-        ticker, company_name, peer_data, config
+        ticker, company_name, peer_data, config, state.get('sector'),
+        quant_context=state.get('quant_text_for_synthesis', ''),
+        strategy_context=state.get('strategy_results', '')
     )
     
     content = results.get("content", "No valuation analysis generated.") if isinstance(results, dict) else str(results)

@@ -1,14 +1,13 @@
+import asyncio
+import io
 import time
 import random
-import pandas as pd
-import io
 import logging
-import undetected_chromedriver as uc
+import platform
+import threading
+import pandas as pd
 from bs4 import BeautifulSoup
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 # Configure Logger
 logger = logging.getLogger('screener_handler')
@@ -21,28 +20,20 @@ if not logger.handlers:
 
 class ScreenerHandler:
     def __init__(self):
-        # 1. SETUP OPTIONS
-        self.options = uc.ChromeOptions()
-        self.options.add_argument("--window-size=1920,1080")
-        self.options.add_argument("--no-sandbox")
-        self.options.add_argument("--disable-dev-shm-usage")
-        
-        my_user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        self.options.add_argument(f'--user-agent={my_user_agent}')
-        
-        # Uncomment to run invisible
-        self.options.add_argument("--headless=new")
+        # Playwright setup happens directly in async contexts
+        pass
 
-    def _login(self, driver, email, password):
+    async def _login_async(self, page, email, password):
         """Performs login to ensure custom columns are visible."""
         try:
             logger.info("🔐 Logging in to access custom columns...")
-            driver.get("https://www.screener.in/login/")
-            wait = WebDriverWait(driver, 15)
-            wait.until(EC.visibility_of_element_located((By.ID, "id_username"))).send_keys(email)
-            wait.until(EC.visibility_of_element_located((By.ID, "id_password"))).send_keys(password)
-            driver.find_element(By.XPATH, "//button[@type='submit']").click()
-            wait.until(EC.presence_of_element_located((By.XPATH, "//input[@placeholder='Search for a company']")))
+            await page.goto("https://www.screener.in/login/", wait_until="domcontentloaded")
+            await page.wait_for_selector("#id_username", timeout=15000)
+            await page.fill("#id_username", email)
+            await page.fill("#id_password", password)
+            await page.click("button[type='submit']")
+            await page.wait_for_url(lambda url: "/login/" not in url, timeout=20000)
+            await page.wait_for_load_state("domcontentloaded")
             logger.info("✅ Login Successful.")
             return True
         except Exception as e:
@@ -60,103 +51,140 @@ class ScreenerHandler:
         except ValueError:
             return 0.0
 
-    def fetch_wrapper_data(self, start_url, email=None, password=None):
-        """
-        Harvests data and Maps Names to Ticker IDs robustly.
-        """
-        driver = None
+    async def _fetch_wrapper_data_async(self, start_url, email=None, password=None):
+        logger.info(f"Starting Harvest: {start_url}")
         all_dfs = []
         page_num = 1
         
-        logger.info(f"Starting Harvest: {start_url}")
-        
-        try:
-            driver = uc.Chrome(options=self.options, use_subprocess=True, version_main=142)
-            wait = WebDriverWait(driver, 20)
-            
-            if email and password:
-                if not self._login(driver, email, password):
-                    return pd.DataFrame(), "Login Failed."
+        async with async_playwright() as p:
+            launch_args = [
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--window-size=1920,1080",
+            ]
+            executable_path = "/usr/bin/chromium" if platform.system() == "Linux" else None
+            browser = await p.chromium.launch(
+                headless=True,
+                args=launch_args,
+                executable_path=executable_path,
+            )
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1920, "height": 1080},
+            )
+            page = await context.new_page()
 
-            driver.get(start_url)
-            time.sleep(3)
-
-            # --- HEADER EXTRACTION ---
             try:
-                header_element = driver.find_element(By.TAG_NAME, "h1")
-                screen_name = header_element.text.strip()
-                logger.info(f"🎯 PROCESSING TARGET: '{screen_name}'")
-            except:
-                logger.info("🎯 PROCESSING TARGET: Unknown (Header not found)")
-            # -------------------------
+                if email and password:
+                    success = await self._login_async(page, email, password)
+                    if not success:
+                        return pd.DataFrame(), "Login Failed."
 
-            while True:
+                await page.goto(start_url, wait_until="domcontentloaded")
+                await asyncio.sleep(1)
+
+                # --- HEADER EXTRACTION ---
                 try:
-                    # 1. Parse HTML Source
-                    source = driver.page_source
-                    soup = BeautifulSoup(source, "html.parser")
-                    
-                    # 2. Extract Data via Pandas
-                    tables = pd.read_html(io.StringIO(source))
-                    if tables:
-                        df = tables[0]
-                        df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
-                        if 'S.No.' in df.columns: df = df.drop(columns=['S.No.'])
-                        
-                        # 3. ROBUST TICKER EXTRACTION (The Fix)
-                        # Create a Dictionary Map: { "Company Name": "TickerID" }
-                        name_to_id = {}
-                        
-                        # Find all rows in the table body
-                        rows = soup.select("table tbody tr")
-                        
-                        for row in rows:
-                            # Find the company link
-                            link = row.select_one("a[href*='/company/']")
-                            if link:
-                                name_text = link.get_text(strip=True)
-                                href = link['href']
-                                # Extract ID from href (e.g., /company/531727/)
-                                parts = href.split('/')
-                                if len(parts) > 2:
-                                    # parts[2] is the ID
-                                    name_to_id[name_text] = parts[2]
-                        
-                        # Apply the map to the DataFrame
-                        # We look up the Name in the dictionary. If not found, fallback to Name.
-                        # df.iloc[:, 0] is assumed to be the Name column
-                        df['TickerID'] = df.iloc[:, 0].apply(lambda x: name_to_id.get(str(x).strip(), x))
-                            
-                        all_dfs.append(df)
-                        logger.info(f"   ✅ Page {page_num} scraped ({len(df)} rows)")
-                    else:
-                        logger.warning(f"   ⚠️ No table found on Page {page_num}")
+                    header_element = page.locator("h1").first
+                    screen_name = (await header_element.inner_text()).strip()
+                    logger.info(f"🎯 PROCESSING TARGET: '{screen_name}'")
+                except:
+                    logger.info("🎯 PROCESSING TARGET: Unknown (Header not found)")
+                # -------------------------
 
-                    # 4. Pagination
+                while True:
                     try:
-                        next_btn = driver.find_element(By.XPATH, "//div[@class='pagination']//a[contains(text(), 'Next')]")
-                        next_btn.click()
-                        page_num += 1
-                        time.sleep(random.uniform(2.0, 4.0))
-                    except NoSuchElementException:
-                        logger.info("   🛑 Reached last page.")
-                        break
+                        # 1. Parse HTML Source
+                        source = await page.content()
+                        soup = BeautifulSoup(source, "html.parser")
                         
-                except Exception as e:
-                    logger.error(f"   ⚠️ Error processing page {page_num}: {e}")
-                    break
-        
-        except Exception as e:
-            logger.error(f"Critical Harvest Error: {e}")
-        finally:
-            if driver:
-                driver.quit()
-        
+                        # 2. Extract Data via Pandas
+                        tables = pd.read_html(io.StringIO(source))
+                        if tables:
+                            df = tables[0]
+                            df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
+                            if 'S.No.' in df.columns: df = df.drop(columns=['S.No.'])
+                            
+                            # 3. ROBUST TICKER EXTRACTION
+                            name_to_id = {}
+                            rows = soup.select("table tbody tr")
+                            for row in rows:
+                                link = row.select_one("a[href*='/company/']")
+                                if link:
+                                    name_text = link.get_text(strip=True)
+                                    href = link['href']
+                                    parts = href.split('/')
+                                    if len(parts) > 2:
+                                        name_to_id[name_text] = parts[2]
+                            
+                            df['TickerID'] = df.iloc[:, 0].apply(lambda x: name_to_id.get(str(x).strip(), x))
+                                
+                            all_dfs.append(df)
+                            logger.info(f"   ✅ Page {page_num} scraped ({len(df)} rows)")
+                        else:
+                            logger.warning(f"   ⚠️ No table found on Page {page_num}")
+
+                        # 4. Pagination
+                        try:
+                            next_btn = page.locator("div.pagination a:has-text('Next')")
+                            if await next_btn.count() > 0:
+                                await next_btn.first.click()
+                                await page.wait_for_load_state("domcontentloaded")
+                                page_num += 1
+                                await asyncio.sleep(random.uniform(1.0, 2.5))
+                            else:
+                                logger.info("   🛑 Reached last page.")
+                                break
+                        except Exception:
+                            logger.info("   🛑 Reached last page (error clicking next).")
+                            break
+                            
+                    except Exception as e:
+                        logger.error(f"   ⚠️ Error processing page {page_num}: {e}")
+                        break
+            
+            except Exception as e:
+                logger.error(f"Critical Harvest Error: {e}")
+            finally:
+                await context.close()
+                await browser.close()
+            
         if not all_dfs:
             return pd.DataFrame(), "No data found."
             
         full_df = pd.concat(all_dfs, ignore_index=True)
         return full_df, None
+
+    def fetch_wrapper_data(self, start_url, email=None, password=None):
+        """Synchronous wrapper to run async Playwright safely in Streamlit/Windows."""
+        result_container = [None, None]
+        exception_container = [None]
+
+        def run_in_thread():
+            if platform.system() == "Windows":
+                loop = asyncio.ProactorEventLoop()
+            else:
+                loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                out_df, msg = loop.run_until_complete(self._fetch_wrapper_data_async(start_url, email, password))
+                result_container[0] = out_df
+                result_container[1] = msg
+            except Exception as e:
+                exception_container[0] = e
+            finally:
+                loop.close()
+
+        thread = threading.Thread(target=run_in_thread, daemon=True)
+        thread.start()
+        thread.join()
+
+        if exception_container[0]:
+            logger.error(f"Thread Error: {exception_container[0]}")
+            return pd.DataFrame(), str(exception_container[0])
+
+        return result_container[0], result_container[1]
 
     def filter_survivors(self, df):
         """
@@ -179,8 +207,9 @@ class ScreenerHandler:
             elif 'cmp' in c_low and '/' not in c_low: col_map['Price'] = col
             elif 'mar' in c_low and 'cap' in c_low: col_map['Market Cap'] = col
             elif 'tickerid' in c_low: col_map['TickerID'] = col
+            elif 'opm' in c_low: col_map['OPM'] = col
 
-        required = ['Pledge', 'D/E', 'ROCE', 'PEG', 'TickerID', 'Market Cap']
+        required = ['Pledge', 'D/E', 'ROCE', 'PEG', 'TickerID', 'Market Cap', 'OPM', 'FCF']
         missing = [k for k in required if k not in col_map]
         
         if missing:
@@ -192,8 +221,6 @@ class ScreenerHandler:
             if key not in ['Name', 'TickerID']:
                 clean_df[orig] = clean_df[orig].apply(self._clean_numeric)
 
-        fcf_mask = (clean_df[col_map['FCF']] > 0) if 'FCF' in col_map else True
-
         # 3. Apply Filters
         mask = (
             (clean_df[col_map['Pledge']] <= 0.1) & 
@@ -201,8 +228,11 @@ class ScreenerHandler:
             (clean_df[col_map['ROCE']] > 15.0) & 
             (clean_df[col_map['PEG']] > 0.0) & 
             (clean_df[col_map['PEG']] < 2.0) & 
-            (clean_df[col_map['Market Cap']] > 500.0) & 
-            fcf_mask
+            (clean_df[col_map['Market Cap']] > 1000.0) & 
+#            (clean_df[col_map['OPM']] > 15.0) &
+            (clean_df[col_map['FCF']] > 0)
+ #           (clean_df[col_map['FCF']] > 0) &
+ #           (clean_df[col_map['Market Cap']] < 20 * clean_df[col_map['FCF']])
         )
         
         survivors = clean_df[mask].copy()
@@ -210,25 +240,51 @@ class ScreenerHandler:
         rename_dict = {v: k for k, v in col_map.items()}
         survivors = survivors.rename(columns=rename_dict)
         
-        final_cols = ['Name', 'TickerID', 'Price', 'Market Cap', 'PEG', 'ROCE', 'D/E', 'Pledge', 'FCF']
+        final_cols = ['Name', 'TickerID', 'Price', 'Market Cap', 'PEG', 'ROCE', 'D/E', 'Pledge', 'OPM', 'FCF']
         available = [c for c in final_cols if c in survivors.columns]
         
         return survivors[available], f"Found {len(survivors)} qualifiers."
 
-    def get_company_description(self, ticker_name):
-        driver = None
-        try:
-            driver = uc.Chrome(options=self.options, use_subprocess=True, version_main=142)
-            slug = ticker_name.replace(' ', '-').replace('.', '').replace('(', '').replace(')', '').lower()
-            url = f"https://www.screener.in/company/{slug}/"
-            driver.get(url)
-            time.sleep(2)
+    async def _get_company_description_async(self, ticker_name):
+        async with async_playwright() as p:
+            launch_args = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--window-size=1920,1080"]
+            executable_path = "/usr/bin/chromium" if platform.system() == "Linux" else None
+            browser = await p.chromium.launch(headless=True, args=launch_args, executable_path=executable_path)
+            context = await browser.new_context()
+            page = await context.new_page()
             try:
-                about_div = driver.find_element(By.CLASS_NAME, 'about-company')
-                return about_div.text[:400] + "..."
+                slug = ticker_name.replace(' ', '-').replace('.', '').replace('(', '').replace(')', '').lower()
+                url = f"https://www.screener.in/company/{slug}/"
+                await page.goto(url, wait_until="domcontentloaded")
+                about_div = page.locator('.about-company')
+                if await about_div.count() > 0:
+                    text = await about_div.first.inner_text()
+                    return text[:400] + "..."
+                return "Description unavailable."
             except:
                 return "Description unavailable."
-        except:
-            return "Description unavailable."
-        finally:
-            if driver: driver.quit()
+            finally:
+                await context.close()
+                await browser.close()
+
+    def get_company_description(self, ticker_name):
+        """Synchronous wrapper to run async Playwright safely in Streamlit/Windows."""
+        result_container = ["Description unavailable."]
+        def run_in_thread():
+            if platform.system() == "Windows":
+                loop = asyncio.ProactorEventLoop()
+            else:
+                loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                desc = loop.run_until_complete(self._get_company_description_async(ticker_name))
+                result_container[0] = desc
+            except:
+                pass
+            finally:
+                loop.close()
+        
+        thread = threading.Thread(target=run_in_thread, daemon=True)
+        thread.start()
+        thread.join()
+        return result_container[0]

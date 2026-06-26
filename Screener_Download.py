@@ -9,6 +9,11 @@ cookies to a requests.Session for direct PDF downloads where possible.
 
 CHANGE LOG
 ----------
+[2026-03-09] Sector Scraping for Dynamic Valuation
+  - Updated `scrape_peers_data` to also scrape the company's sector from the 
+    investor peers breadcrumb trail structure.
+  - The sector is now extracted and stored in `file_buffers['sector']`.
+
 [2026-03-08] Add keyword-based transcript filtering
   - After downloading each transcript PDF, extract first-page text using pypdf
     and check for special event keywords (investor day, analyst meet, AGM, etc.).
@@ -74,11 +79,13 @@ EARNINGS_CALL_INDICATORS = [
     " q1 ", " q2 ", " q3 ", " q4 ",
     " q1-", " q2-", " q3-", " q4-",
     "q1 fy", "q2 fy", "q3 fy", "q4 fy",
+    "q1fy", "q2fy", "q3fy", "q4fy",
     "quarter 1", "quarter 2", "quarter 3", "quarter 4",
     "first quarter", "second quarter", "third quarter", "fourth quarter",
     "1st quarter", "2nd quarter", "3rd quarter", "4th quarter",
     # Earnings-specific phrases
     "earnings call", "earnings conference",
+    "earning call", "earning conference",
     "results conference", "results call",
     "quarterly results", "financial results",
     "quarterly earnings",
@@ -90,24 +97,42 @@ def _is_earnings_call_transcript(pdf_bytes_io: io.BytesIO) -> bool:
     Checks whether a downloaded transcript PDF is a quarterly earnings call
     (returns True) or a special event like Investor Day/AGM (returns False).
     Uses POSITIVE detection: looks for quarter identifiers (Q1/Q2/Q3/Q4)
-    and earnings-related phrases on the first page. If none are found,
+    and earnings-related phrases on the first 2 pages. If none are found,
     the transcript is classified as a non-earnings special event.
+
+    Why 2 pages? Indian concall PDFs typically have a BSE/NSE regulatory
+    cover letter on page 1 that may not always contain "earnings conference".
+    The actual transcript title page (with Q1/Q2/Q3/Q4 identifiers) is
+    usually on page 2.
     """
     try:
         pdf_bytes_io.seek(0)
         reader = PdfReader(pdf_bytes_io)
         if not reader.pages:
             return True  # Can't determine — assume earnings call
-        first_page_text = reader.pages[0].extract_text() or ""
-        first_page_lower = f" {first_page_text.lower()} "  # Pad with spaces for word boundary matching
+
+        # Extract text from the first 2 pages (cover letter + title page)
+        combined_text = ""
+        for i in range(min(2, len(reader.pages))):
+            combined_text += (reader.pages[i].extract_text() or "") + " "
+        
+        # If the PDF is a scanned image, extract_text() will return nothing.
+        # It's better to assume it's valid than to aggressively skip it.
+        if len(combined_text.strip()) < 50:
+            logger.info("     🔍 Extracted text is empty (likely scanned PDF). Assuming earnings call.")
+            pdf_bytes_io.seek(0)
+            return True
+
+        # Normalize all whitespace (newlines, tabs, multiple spaces) into single spaces
+        normalized_text = f" {' '.join(combined_text.lower().split())} "
 
         for indicator in EARNINGS_CALL_INDICATORS:
-            if indicator in first_page_lower:
+            if indicator in normalized_text:
                 pdf_bytes_io.seek(0)
                 return True  # Confirmed earnings call
 
         # No earnings indicators found — likely a special event
-        logger.info(f"     🔍 No earnings call indicators found on first page. Classifying as special event.")
+        logger.info(f"     🔍 No earnings call indicators found on first 2 pages. Classifying as special event.")
         pdf_bytes_io.seek(0)
         return False
     except Exception as e:
@@ -116,8 +141,11 @@ def _is_earnings_call_transcript(pdf_bytes_io: io.BytesIO) -> bool:
         return True  # On error, assume earnings call to avoid skipping valid data
 
 
-async def scrape_peers_data(page) -> pd.DataFrame:
-    """Scrapes the Peers table from the current company page."""
+async def scrape_peers_data(page) -> tuple:
+    """Scrapes the Peers table and sector breadcrumb from the current company page.
+    Returns (peer_df: pd.DataFrame, sector: str).
+    """
+    sector = "Unknown"
     try:
         logger.info("Attempting to scrape Peers table...")
         target_id = "peers-table-placeholder"
@@ -129,6 +157,27 @@ async def scrape_peers_data(page) -> pd.DataFrame:
 
         await container.scroll_into_view_if_needed()
 
+        # --- SECTOR BREADCRUMB SCRAPE ---
+        try:
+            breadcrumb_els = await page.locator(
+                "#peers a[href*='/market/'], "
+                "#peers-table-placeholder a[href*='/market/']"
+            ).all()
+            if breadcrumb_els:
+                texts = []
+                for el in breadcrumb_els:
+                    t = (await el.inner_text()).strip()
+                    if t:
+                        texts.append(t)
+                # Use second-to-last for broader industry grouping, or last if only one
+                sector = texts[-2] if len(texts) >= 2 else texts[-1] if texts else "Unknown"
+                logger.info(f"✅ Sector Identified: {sector} (breadcrumb: {' > '.join(texts)})")
+            else:
+                logger.warning("Sector breadcrumb not found in Peers section.")
+        except Exception as e:
+            logger.warning(f"Could not scrape sector breadcrumb: {e}")
+
+        # --- PEERS TABLE SCRAPE ---
         table_selector = f"#{target_id} table"
         try:
             table_element = await page.wait_for_selector(table_selector, timeout=10000)
@@ -145,10 +194,10 @@ async def scrape_peers_data(page) -> pd.DataFrame:
                 peer_df = peer_df.drop(columns=["S.No."])
             peer_df = peer_df.loc[:, ~peer_df.columns.str.contains('^Unnamed', case=False)]
             logger.info(f"✅ SUCCESS: Scraped Peer Data Table ({len(peer_df)} rows).")
-            return peer_df
+            return peer_df, sector
     except Exception as e:
         logger.warning(f"Could not scrape Peers table: {e}")
-    return pd.DataFrame()
+    return pd.DataFrame(), sector
 
 
 async def _download_financial_data_async(
@@ -329,7 +378,8 @@ async def _download_financial_data_async(
 
             # --- 5. PEERS ---
             if need_peers and company_name:
-                peer_data = await scrape_peers_data(page)
+                peer_data, scraped_sector = await scrape_peers_data(page)
+                file_buffers['sector'] = scraped_sector
             else:
                 logger.info("⏭️ Skipped Peers.")
 
@@ -393,7 +443,10 @@ async def _download_financial_data_async(
                     if "documents" not in page.url:
                         await page.goto(f"https://www.screener.in/company/{ticker}/#documents", wait_until="domcontentloaded")
 
-                    await page.wait_for_load_state("networkidle", timeout=10000)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=10000)
+                    except PlaywrightTimeoutError:
+                        logger.warning("   > networkidle timeout (non-fatal). Continuing...")
 
                     # Wait for credit ratings heading to confirm section is rendered
                     try:

@@ -1,3 +1,19 @@
+"""
+strategy_agent.py
+=================
+Agent responsible for analyzing Investor Presentations (PPTs) and Credit Rating 
+Reports to extract strategic insights, management commentary, and risk profiles.
+
+CHANGE LOG
+----------
+[2026-03-09] Sector-Specific KPI Extraction
+  - Updated both One-Shot and Map-Reduce prompts to explicitly require the LLM to 
+    extract "Sector-Specific KPIs (The Hard Numbers)". 
+  - Prevents the Valuation Agent from returning "Data Not Available" for critical 
+    metrics like ARPOB (Hospitals) and NIM (Banks) by forcing the Strategy Agent 
+    to proactively pass those numbers down the chain.
+"""
+
 import logging
 import time
 import random
@@ -132,10 +148,24 @@ def _map_reduce_strategy(model, ppt_text, credit_text):
     * **Capex Efficiency:** Is FCF about to explode?
     * **Hidden Assets:** Land/Brands/Patents.
 
-    ### 4. Strategic Pivot & Future Roadmap
+    ### 3. The "Alpha" Drivers (The Reality Check)
+    *[Adopt skeptical CIO persona. Use the Credit Report to ground the PPT claims]*
+    * **Mix Shift:** High-margin vs low-margin growth.
+    * **Capex Efficiency:** Is FCF about to explode?
+    * **Hidden Assets:** Land/Brands/Patents.
+
+    ### 4. Sector-Specific KPIs (The Hard Numbers)
+    *[Extract the core operational metrics that define this specific industry's health. You MUST include the actual numbers/percentages if present in the PPT.]*
+    * e.g., If Hospital: **ARPOB**, **Occupancy Rate**, **ALOS**.
+    * e.g., If Bank/NBFC: **NIM**, **GNPA**, **Credit Cost**, **AUM Growth**.
+    * e.g., If Auto/Capital Goods: **Order Book**, **Capacity Utilization**, **Volume Growth**.
+    * e.g., If IT/Services: **Attrition Rate**, **TCV (Total Contract Value)**, **Client Additions**.
+    *(List the 3-5 most critical numerical KPIs found in the presentation with their latest values)*
+
+    ### 5. Strategic Pivot & Future Roadmap
     [Single biggest change in next 3 years based on extracted notes.]
 
-    ### 5. Final Investment Verdict
+    ### 6. Final Investment Verdict
     * **Bull Case:**
     * **Bear Case:**
     """
@@ -232,10 +262,18 @@ def strategy_analyst_agent(file_buffers, api_key, model_name):
         * **Capex Efficiency:** Is a big capex cycle finishing? (This means Free Cash Flow is about to explode).
         * **Hidden Assets:** Land, brands, or patents that the market ignores.
 
-        ### 4. Strategic Pivot & Future Roadmap
+        ### 4. Sector-Specific KPIs (The Hard Numbers)
+        *[Extract the core operational metrics that define this specific industry's health. You MUST include the actual numbers/percentages if present in the PPT.]*
+        * e.g., If Hospital: **ARPOB**, **Occupancy Rate**, **ALOS**.
+        * e.g., If Bank/NBFC: **NIM**, **GNPA**, **Credit Cost**, **AUM Growth**.
+        * e.g., If Auto/Capital Goods: **Order Book**, **Capacity Utilization**, **Volume Growth**.
+        * e.g., If IT/Services: **Attrition Rate**, **TCV (Total Contract Value)**, **Client Additions**.
+        *(List the 3-5 most critical numerical KPIs found in the presentation with their latest values)*
+
+        ### 5. Strategic Pivot & Future Roadmap
         [What is the *single biggest* change coming in the next 3 years? (e.g., "Entry into EV components" or "Doubling Export capacity"). Use the PPT's "Future Strategy" slides.]
 
-        ### 5. Final Investment Verdict
+        ### 6. Final Investment Verdict
         * **Bull Case:** [The most optimistic outcome if the strategy works.]
         * **Bear Case:** [The biggest structural risk identified.]
         """

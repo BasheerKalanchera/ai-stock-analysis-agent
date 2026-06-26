@@ -350,7 +350,7 @@ def get_analysis_from_gemini(pnl_df, bs_df, cf_df, ticker, opm_table_string, age
         for attempt in range(max_retries):
             try:
                 logger.info(f"--- Calling Gemini for Quantitative Analysis of {ticker} (Attempt {attempt + 1}) ---")
-                response = model.generate_content(prompt)
+                response = model.generate_content(prompt, request_options={"timeout": 600})
                 logger.info(f"--- Finished Gemini Call for {ticker} ---")
                 return response.text
             

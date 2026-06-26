@@ -1,3 +1,17 @@
+"""
+graphs.py
+=========
+Defines the LangGraph workflows for the AI Stock Analysis Agent. Contains the main
+full workflow and all the specialized "deep-dive" isolated workflows.
+
+CHANGE LOG
+----------
+[2026-03-09] Standalone Valuation Deep-Dive Fix
+  - Rewired `valuation_only_graph` to include `quant_prereq` and `strategy_prereq` nodes.
+  - This ensures that when the Valuation agent runs standalone, it has the rich financial
+    time-series and sector KPI extractions needed to fulfill its grounded methodology constraints.
+"""
+
 from langgraph.graph import StateGraph, END
 from state import StockAnalysisState
 import nodes
@@ -110,11 +124,22 @@ quant_only_graph = quant_workflow_def.compile()
 # 8. VALUATION DEEP-DIVE GRAPH
 # ==============================================================================
 val_workflow_def = StateGraph(StockAnalysisState)
+
+# 1. Fetch Data
 val_workflow_def.add_node("screener_for_valuation", nodes.screener_for_valuation_node)
+
+# 2. Run Prerequisites (Quant & Strategy) to build context for grounding
+val_workflow_def.add_node("quant_prereq", nodes.quantitative_analysis_node)
+val_workflow_def.add_node("strategy_prereq", nodes.strategy_analysis_node)
+
+# 3. Run Main Agent
 val_workflow_def.add_node("isolated_valuation", nodes.isolated_valuation_node)
 
+# Define Flow
 val_workflow_def.set_entry_point("screener_for_valuation")
-val_workflow_def.add_edge("screener_for_valuation", "isolated_valuation")
+val_workflow_def.add_edge("screener_for_valuation", "quant_prereq")
+val_workflow_def.add_edge("quant_prereq", "strategy_prereq")
+val_workflow_def.add_edge("strategy_prereq", "isolated_valuation")
 val_workflow_def.add_edge("isolated_valuation", END)
 
 valuation_only_graph = val_workflow_def.compile()
