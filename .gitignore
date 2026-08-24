@@ -27,3 +27,6 @@ reports/
 # Ignore Streamlit secrets and other sensitive files
 .streamlit/secrets.toml
 
+# Contains a hardcoded API key - keep local only, never commit
+check_Tavily_usage.py
+
