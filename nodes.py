@@ -211,26 +211,30 @@ def valuation_analysis_node(state: StockAnalysisState):
     return {"valuation_results": results if isinstance(results, dict) else {}, "log_file_content": log_content_accumulator}
 
 def synthesis_node(state: StockAnalysisState):
-    log_content_accumulator = state['log_file_content']
+    log_content_accumulator = state.get('log_file_content', '')
     config = state['agent_config']
     quant_text = state.get('quant_text_for_synthesis', "Quantitative analysis was not performed.")
+    workflow_mode = state.get('workflow_mode', "Full Workflow (PDF Report)")
+    company_identifier = state.get('company_name') or state.get('ticker')
     
     report = execute_with_fallback(
-        generate_investment_summary, log_content_accumulator, "Synthesis",
-        state['company_name'] or state['ticker'],
+        generate_investment_summary, log_content_accumulator, f"Synthesis ({workflow_mode})",
+        company_identifier,
         quant_text,
-        state['qualitative_results'],
-        state['valuation_results'],
+        state.get('qualitative_results') or {},
+        state.get('valuation_results') or {},
         state.get('risk_results'),
         state.get('strategy_results'),
-        config
+        config,
+        workflow_mode=workflow_mode
     )
     
-    log_content_accumulator += f"## AGENT 7: FINAL SYNTHESIS REPORT\n\n{report}\n\n---\n\n"
+    log_content_accumulator += f"## SYNTHESIS REPORT ({workflow_mode})\n\n{report}\n\n---\n\n"
     return {"final_report": report, "log_file_content": log_content_accumulator}
 
 def generate_report_node(state: StockAnalysisState):
     pdf_buffer = io.BytesIO()
+    workflow_mode = state.get('workflow_mode', "Full Workflow (PDF Report)")
     success = create_pdf_report(
         ticker=state['ticker'],
         company_name=state.get('company_name'),
@@ -240,7 +244,8 @@ def generate_report_node(state: StockAnalysisState):
         risk_results=state.get('risk_results', ""),
         valuation_results=state.get('valuation_results', {}),
         final_report=state.get('final_report', "Report could not be fully generated."),
-        file_path=pdf_buffer
+        file_path=pdf_buffer,
+        workflow_mode=workflow_mode
     )
     
     if not success:

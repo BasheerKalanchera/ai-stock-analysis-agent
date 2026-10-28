@@ -1,14 +1,49 @@
-﻿import datetime
+import datetime
 import re
 import argparse
 import os
 import json
+import pandas as pd
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable, Image, Table, TableStyle, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 from reportlab.lib import colors
 import io
+
+def sanitize_for_reportlab(text):
+    """
+    Escapes XML special characters (&, <, >) while preserving
+    ReportLab-supported markup tags: <b>, </b>, <i>, </i>, <br/>, <a ...>, </a>.
+    """
+    if not text:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
+
+    # 1. Temporarily replace allowed tags with unique tokens
+    tokens = {}
+    def repl_tag(m):
+        tok = f"__RLTAG_{len(tokens)}__"
+        tokens[tok] = m.group(0)
+        return tok
+
+    tag_pattern = r'<\/?(?:b|i|br\s*\/|br|a(?:\s+[^>]+)?)>'
+    text = re.sub(tag_pattern, repl_tag, text, flags=re.IGNORECASE)
+
+    # 2. Escape & that is not already part of an XML entity
+    text = re.sub(r'&(?!(?:amp|bull|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)', '&amp;', text)
+
+    # 3. Escape remaining raw < and >
+    text = text.replace('<', '&lt;').replace('>', '&gt;')
+
+    # 4. Restore preserved tags
+    for tok, original in tokens.items():
+        if original.lower() == '<br>':
+            original = '<br/>'
+        text = text.replace(tok, original)
+
+    return text
 
 def clean_and_format_text(text):
     """
@@ -26,7 +61,7 @@ def clean_and_format_text(text):
     
     # Use regex to find all bullet variations (*, -, etc.)
     text = re.sub(r'^\s*[\*\-]\s+', '---BULLET---', text, flags=re.MULTILINE)
-    return text
+    return sanitize_for_reportlab(text)
 
 
 def parse_markdown_table(md_table_lines):
@@ -74,6 +109,7 @@ def make_pdf_table(rows, body_style, available_width):
             # 6. Final cleanup for parser
             cell_text = cell_text.replace('<br>', '<br/>')
             cell_text = re.sub(r'\s*<br/>\s*', '<br/>', cell_text)
+            cell_text = sanitize_for_reportlab(cell_text)
             
             new_row.append(Paragraph(cell_text, body_style))
         data.append(new_row)
@@ -86,6 +122,8 @@ def make_pdf_table(rows, body_style, available_width):
         col_widths = [available_width * 0.25, available_width * 0.375, available_width * 0.375]
     elif num_cols == 2:
         col_widths = [available_width * 0.30, available_width * 0.70]
+    elif num_cols == 4:
+        col_widths = [available_width * 0.20, available_width * 0.26, available_width * 0.27, available_width * 0.27]
     else:
         col_widths = [available_width / num_cols] * num_cols
 
@@ -117,11 +155,12 @@ def create_pdf_report(
     risk_results, 
     valuation_results, 
     final_report, 
-    file_path
+    file_path,
+    workflow_mode=None
 ):
     """
-    Generates a professional-looking PDF report from ALL analysis results.
-    Includes a Table of Contents and strictly formatting.
+    Generates a professional-looking PDF report from analysis results.
+    Includes a dynamic Table of Contents tailored to whichever mode was run.
     """
     doc = SimpleDocTemplate(file_path, pagesize=letter)
     available_width = doc.width
@@ -158,8 +197,6 @@ def create_pdf_report(
             
             # --- HYBRID PARSER: Detect Tables vs Text ---
             if "|" in lines[0]: 
-                # Looks like a table start. 
-                # We separate lines that contain '|' (table) from subsequent lines that don't (analysis text).
                 table_lines = []
                 text_lines = []
                 capture_mode = "TABLE"
@@ -169,10 +206,8 @@ def create_pdf_report(
                         if "|" in line:
                             table_lines.append(line)
                         else:
-                            # Verify if it's just a separator line or empty
                             if not line.strip(): 
                                 continue
-                            # Switch to text mode
                             capture_mode = "TEXT"
                             text_lines.append(line)
                     else:
@@ -207,98 +242,140 @@ def create_pdf_report(
                         story.append(Paragraph(line, style))
 
     # --- 0. Title Page ---
-    story.append(Paragraph(f"Investment Analysis Report: {company_name or ticker}", title_style))
+    if workflow_mode and workflow_mode != "Full Workflow (PDF Report)":
+        title_text = f"{workflow_mode} Report: {company_name or ticker}"
+    else:
+        title_text = f"Investment Analysis Report: {company_name or ticker}"
+
+    story.append(Paragraph(title_text, title_style))
     story.append(Paragraph(f"Generated on: {datetime.datetime.now().strftime('%d-%B-%Y %H:%M')}", subtitle_style))
     story.append(Spacer(1, 24))
     story.append(HRFlowable(width="100%", thickness=1, color=colors.navy))
     story.append(Spacer(1, 24))
-
-    # --- 1. Table of Contents (Clickable) ---
-    story.append(Paragraph("<b>Table of Contents</b>", heading_style))
-    story.append(Spacer(1, 12))
-
-    # Define TOC links (Anchor Name, Display Text)
-    # UPDATED: Added Investment Thesis as #1 and renumbered others
-    toc_items = [
-        ("thesis", "1. Investment Thesis"),
-        ("exec_summary", "2. Executive Summary & Synthesis"),
-        ("valuation", "3. Valuation & Governance Analysis"),
-        ("strategy", "4. Strategic Outlook & Alpha Analysis"),
-        ("quant", "5. Quantitative Financial Analysis"),
-        ("qual", "6. Qualitative & Management Analysis"),
-        ("risk", "7. Risk & Credit Profile")
-    ]
-
-    for anchor, title in toc_items:
-        # Create a clickable link
-        link_text = f'<a href="#{anchor}" color="blue">{title}</a>'
-        story.append(Paragraph(link_text, toc_link_style))
-    
-    story.append(PageBreak())
 
     # --- SPLIT LOGIC: SEPARATE THESIS FROM SUMMARY ---
     thesis_content = ""
     summary_content = final_report if final_report else ""
 
     if final_report:
-        # Look for the "Executive Summary" header pattern to split the text.
-        # This regex matches headers like "# Executive Summary", "## 1. Executive Summary", etc.
-        # The split will put everything BEFORE the header into thesis_content, 
-        # and everything AFTER into summary_content.
         match = re.search(r'(?im)^#+\s*\d*\.?\s*Executive Summary', final_report)
-        
         if match:
             split_index = match.start()
             thesis_content = final_report[:split_index].strip()
-            # We skip the specific header itself because we add our own PDF header below
             summary_content = final_report[match.end():].strip()
         elif "Investment Thesis" in final_report and "Executive Summary" in final_report:
-             # Fallback: simple text splitting if regex fails but keywords exist
-             parts = final_report.split("Executive Summary", 1)
-             if len(parts) == 2:
-                 thesis_content = parts[0].replace("#", "").strip()
-                 summary_content = parts[1].strip()
+            parts = final_report.split("Executive Summary", 1)
+            if len(parts) == 2:
+                thesis_content = parts[0].replace("#", "").strip()
+                summary_content = parts[1].strip()
 
-    # --- Section 1: INVESTMENT THESIS ---
+    # --- 1. Dynamic Table of Contents (Clickable) ---
+    active_toc_items = []
+    item_num = 1
     if thesis_content:
-        header_text = f'<a name="thesis"/>{toc_items[0][1]}'
+        active_toc_items.append(("thesis", f"{item_num}. Investment Thesis"))
+        item_num += 1
+    if summary_content:
+        exec_label = "Executive Summary & Synthesis" if workflow_mode in (None, "Full Workflow (PDF Report)") else "Executive Synthesis"
+        active_toc_items.append(("exec_summary", f"{item_num}. {exec_label}"))
+        item_num += 1
+    if valuation_results:
+        active_toc_items.append(("valuation", f"{item_num}. Valuation & Governance Analysis"))
+        item_num += 1
+    if strategy_results:
+        active_toc_items.append(("strategy", f"{item_num}. Strategic Outlook & Alpha Analysis"))
+        item_num += 1
+    if quant_results:
+        active_toc_items.append(("quant", f"{item_num}. Quantitative Financial Analysis"))
+        item_num += 1
+    if qual_results and isinstance(qual_results, dict) and any(qual_results.values()):
+        label = "Qualitative & Management Analysis"
+        if workflow_mode == "QoQ Concall Analysis":
+            label = "QoQ Concall Analysis & Transcripts"
+        elif workflow_mode == "Latest Concall Analysis":
+            label = "Latest Concall Insights"
+        elif workflow_mode == "SEBI Violations Check (MVP)":
+            label = "SEBI Regulatory Status"
+        elif workflow_mode == "Scuttlebutt Research":
+            label = "Scuttlebutt Intel & Investigation"
+        active_toc_items.append(("qual", f"{item_num}. {label}"))
+        item_num += 1
+    if risk_results:
+        active_toc_items.append(("risk", f"{item_num}. Risk & Credit Profile"))
+        item_num += 1
+
+    toc_dict = dict(active_toc_items)
+
+    if active_toc_items:
+        story.append(Paragraph("<b>Table of Contents</b>", heading_style))
+        story.append(Spacer(1, 12))
+
+        for anchor, title in active_toc_items:
+            link_text = f'<a href="#{anchor}" color="blue">{title}</a>'
+            story.append(Paragraph(link_text, toc_link_style))
+        
+        # Only pagebreak if we have 3 or more sections or in Full mode
+        if len(active_toc_items) >= 3 or workflow_mode in (None, "Full Workflow (PDF Report)"):
+            story.append(PageBreak())
+        else:
+            story.append(Spacer(1, 16))
+            story.append(HRFlowable(width="100%", thickness=0.5, color=colors.grey))
+            story.append(Spacer(1, 16))
+
+    # --- Section: INVESTMENT THESIS ---
+    if thesis_content and "thesis" in toc_dict:
+        header_text = f'<a name="thesis"/>{toc_dict["thesis"]}'
         story.append(Paragraph(header_text, heading_style))
         add_content(thesis_content, body_style)
         story.append(HRFlowable(width="100%", thickness=1, color=colors.navy))
         story.append(Spacer(1, 12))
 
-    # --- Section 2: EXECUTIVE SUMMARY (Synthesis) ---
-    if summary_content:
-        header_text = f'<a name="exec_summary"/>{toc_items[1][1]}'
+    # --- Section: EXECUTIVE SUMMARY (Synthesis) ---
+    if summary_content and "exec_summary" in toc_dict:
+        header_text = f'<a name="exec_summary"/>{toc_dict["exec_summary"]}'
         story.append(Paragraph(header_text, heading_style))
         add_content(summary_content, body_style)
         story.append(HRFlowable(width="100%", thickness=1, color=colors.navy))
         story.append(Spacer(1, 12))
 
-    # --- Section 3: VALUATION ANALYSIS ---
-    if valuation_results:
-        header_text = f'<a name="valuation"/>{toc_items[2][1]}'
+    # --- Section: VALUATION ANALYSIS ---
+    if valuation_results and "valuation" in toc_dict:
+        header_text = f'<a name="valuation"/>{toc_dict["valuation"]}'
         story.append(Paragraph(header_text, heading_style))
         
         val_text = ""
+        peer_tbl = None
         if isinstance(valuation_results, dict):
             val_text = valuation_results.get('content', '')
+            peer_tbl = valuation_results.get('peer_comparison_table')
         else:
             val_text = str(valuation_results)
             
         add_content(val_text, body_style)
+        
+        if peer_tbl is not None:
+            try:
+                if isinstance(peer_tbl, pd.DataFrame) and not peer_tbl.empty:
+                    p_rows = [list(peer_tbl.columns)] + peer_tbl.astype(str).values.tolist()
+                    tbl = make_pdf_table(p_rows, body_style, available_width)
+                    if tbl:
+                        story.append(Spacer(1, 6))
+                        story.append(Paragraph("<b>Peer Comparison Matrix:</b>", sub_heading_style))
+                        story.append(tbl)
+            except Exception:
+                pass
         story.append(Spacer(1, 12))
 
-    # --- Section 4: STRATEGY ANALYSIS ---
-    if strategy_results:
-        header_text = f'<a name="strategy"/>{toc_items[3][1]}'
+    # --- Section: STRATEGY ANALYSIS ---
+    if strategy_results and "strategy" in toc_dict:
+        header_text = f'<a name="strategy"/>{toc_dict["strategy"]}'
         story.append(Paragraph(header_text, heading_style))
         add_content(strategy_results, body_style)
         story.append(Spacer(1, 12))
 
-    # --- Section 5: QUANTITATIVE ANALYSIS ---
-    if quant_results:
-        header_text = f'<a name="quant"/>{toc_items[4][1]}'
+    # --- Section: QUANTITATIVE ANALYSIS ---
+    if quant_results and "quant" in toc_dict:
+        header_text = f'<a name="quant"/>{toc_dict["quant"]}'
         story.append(Paragraph(header_text, heading_style))
         if isinstance(quant_results, list):
             for item in quant_results:
@@ -308,6 +385,16 @@ def create_pdf_report(
                 if item_type == "text" and content:
                     add_content(content, body_style)
                     story.append(Spacer(1, 6))
+                elif item_type == "table" and content is not None:
+                    try:
+                        if isinstance(content, pd.DataFrame) and not content.empty:
+                            t_rows = [list(content.columns)] + content.astype(str).values.tolist()
+                            tbl = make_pdf_table(t_rows, body_style, available_width)
+                            if tbl:
+                                story.append(tbl)
+                                story.append(Spacer(1, 6))
+                    except Exception:
+                        pass
                 elif item_type == "chart" and content:
                     try:
                         if isinstance(content, io.BytesIO):
@@ -323,9 +410,9 @@ def create_pdf_report(
             add_content(quant_results, body_style)
         story.append(Spacer(1, 12))
 
-    # --- Section 6: QUALITATIVE ANALYSIS ---
-    if qual_results and isinstance(qual_results, dict):
-        header_text = f'<a name="qual"/>{toc_items[5][1]}'
+    # --- Section: QUALITATIVE ANALYSIS ---
+    if qual_results and isinstance(qual_results, dict) and "qual" in toc_dict:
+        header_text = f'<a name="qual"/>{toc_dict["qual"]}'
         story.append(Paragraph(header_text, heading_style))
         
         for key, value in qual_results.items():
@@ -341,7 +428,7 @@ def create_pdf_report(
                     if match:
                         cleaned_value = match.group(0)
                         parsed_data = json.loads(cleaned_value)
-                        if isinstance(parsed_data, list):
+                        if isinstance(parsed_data, list) and len(parsed_data) > 0:
                             rows = []
                             rows.append(list(parsed_data[0].keys())) 
                             for item in parsed_data:
@@ -352,7 +439,7 @@ def create_pdf_report(
                                 story.append(tbl)
                             story.append(Spacer(1, 12))
                         else:
-                             add_content(str(value), body_style)
+                            add_content(str(value), body_style)
                     else:
                         add_content(str(value), body_style)
                 except Exception:
@@ -362,9 +449,9 @@ def create_pdf_report(
         
         story.append(Spacer(1, 12))
 
-    # --- Section 7: RISK ANALYSIS ---
-    if risk_results:
-        header_text = f'<a name="risk"/>{toc_items[6][1]}'
+    # --- Section: RISK ANALYSIS ---
+    if risk_results and "risk" in toc_dict:
+        header_text = f'<a name="risk"/>{toc_dict["risk"]}'
         story.append(Paragraph(header_text, heading_style))
         add_content(risk_results, body_style)
         story.append(Spacer(1, 12))

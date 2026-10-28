@@ -559,13 +559,14 @@ async def _download_financial_data_async(
             if need_transcripts:
                 logger.info("Scanning for Concall Transcripts...")
                 try:
+                    concall_page_url = f"https://www.screener.in/company/{ticker}/{'consolidated/' if is_consolidated else ''}#documents"
                     if "documents" not in page.url:
-                        await page.goto(f"https://www.screener.in/company/{ticker}/#documents", wait_until="domcontentloaded")
+                        await page.goto(concall_page_url, wait_until="domcontentloaded")
 
                     # Target the specific concalls section container, then find transcript links within it
                     transcript_elements = await page.locator(
-                        ".documents.concalls a.concall-link[title='Raw Transcript'], "
-                        ".documents.concalls a.concall-link:has-text('Transcript')"
+                        ".documents.concalls a[title='Raw Transcript'], "
+                        ".documents.concalls a:has-text('Transcript')"
                     ).all()
 
                     transcript_urls = []

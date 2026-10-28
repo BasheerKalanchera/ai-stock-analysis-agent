@@ -1,4 +1,4 @@
-﻿"""
+"""
 app.py
 ======
 Main Streamlit application for the AI Stock Analysis Agent. Manages the UI,
@@ -189,7 +189,7 @@ def extract_investment_thesis(full_report: str) -> str:
 
 # --- Checkpoint Cleanup ---
 def cleanup_checkpoint(ticker_symbol, workflow_mode):
-    """Remove checkpoint data for a completed run to keep the DB clean."""
+    """Remove checkpoint data for a specific ticker + workflow from DB."""
     if not checkpointer:
         return
     thread_id = f"{ticker_symbol}-{workflow_mode.replace(' ', '_').replace('(', '').replace(')', '')}"
@@ -201,6 +201,18 @@ def cleanup_checkpoint(ticker_symbol, workflow_mode):
             conn.execute("DELETE FROM checkpoints WHERE thread_id = %s", (thread_id,))
     except Exception:
         pass  # Non-critical — don't break the app if cleanup fails
+
+def cleanup_all_checkpoints():
+    """Remove all checkpoint data from the DB."""
+    if not checkpointer:
+        return
+    try:
+        with checkpointer.conn.connection() as conn:
+            conn.execute("DELETE FROM checkpoint_blobs")
+            conn.execute("DELETE FROM checkpoint_writes")
+            conn.execute("DELETE FROM checkpoints")
+    except Exception:
+        pass  # Non-critical
 
 # --- Runner Function ---
 def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_container, progress_text_container, workflow_mode, resume_mode=False, manual_files=None):
@@ -257,9 +269,13 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                 # No checkpoint found — start fresh
                 inputs = fresh_inputs
                 progress_text_container.write(f"🆕 No checkpoint for {ticker_symbol} — starting fresh...")
-        except Exception:
+        except Exception as _cp_err:
+            progress_text_container.write(f"⚠️ Checkpoint read error for {ticker_symbol} ({_cp_err}) — starting fresh...")
             inputs = fresh_inputs
     else:
+        # Fresh run requested (resume_mode is False) — clear any previous checkpoint for this ticker
+        if checkpointer:
+            cleanup_checkpoint(ticker_symbol, workflow_mode)
         inputs = fresh_inputs
     
     final_state_result = {}
@@ -347,6 +363,12 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
         }
         placeholders["fetch_data"].markdown("⏳ **Downloading Financial Data...**")
 
+    # Ensure synthesis and pdf_report placeholders exist for all modes
+    if "synthesis" not in placeholders:
+        placeholders["synthesis"] = status_container.empty()
+    if "pdf_report" not in placeholders:
+        placeholders["pdf_report"] = status_container.empty()
+
     # --- Mark completed steps when resuming ---
     if resume_next_node:
         # Map: (graph node name, placeholder key, display label) in execution order
@@ -364,43 +386,63 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
             "Quantitative Deep-Dive": [
                 ("screener_for_quant", "screener_for_quant", "Excel Data Download"),
                 ("isolated_quant", "isolated_quant", "Quantitative Analysis"),
+                ("synthesis", "synthesis", "Synthesis"),
+                ("generate_report", "pdf_report", "PDF Report"),
             ],
             "Qualitative Deep-Dive": [
                 ("screener_for_qual", "screener_for_qual", "Transcript & Docs Fetch"),
                 ("strategy_prereq", "strategy_prereq", "Strategy Prereq"),
                 ("risk_prereq", "risk_prereq", "Risk Prereq"),
                 ("isolated_qual", "isolated_qual", "Qualitative Analysis"),
+                ("synthesis", "synthesis", "Synthesis"),
+                ("generate_report", "pdf_report", "PDF Report"),
             ],
             "Strategy Deep Dive": [
                 ("screener_for_strategy", "screener_for_strategy", "Investor Presentation Fetch"),
                 ("isolated_strategy", "isolated_strategy", "Strategy Analysis"),
+                ("synthesis", "synthesis", "Synthesis"),
+                ("generate_report", "pdf_report", "PDF Report"),
             ],
             "Valuation & Governance Deep-Dive": [
                 ("screener_for_valuation", "screener_for_valuation", "Peers & Market Data"),
+                ("quant_prereq", "quant_prereq", "Quantitative Prereq"),
+                ("strategy_prereq", "strategy_prereq", "Strategy Prereq"),
                 ("isolated_valuation", "isolated_valuation", "Valuation Analysis"),
+                ("synthesis", "synthesis", "Synthesis"),
+                ("generate_report", "pdf_report", "PDF Report"),
             ],
             "Risk Analysis Only": [
                 ("screener_for_risk", "screener_for_risk", "Credit Ratings Fetch"),
                 ("isolated_risk", "isolated_risk", "Risk Analysis"),
+                ("synthesis", "synthesis", "Synthesis"),
+                ("generate_report", "pdf_report", "PDF Report"),
             ],
             "SEBI Violations Check (MVP)": [
                 ("screener_metadata", "screener_metadata", "Company Identification"),
                 ("sebi_check", "sebi_check", "SEBI Check"),
+                ("synthesis", "synthesis", "Synthesis"),
+                ("generate_report", "pdf_report", "PDF Report"),
             ],
             "Latest Concall Analysis": [
                 ("fetch_latest", "fetch_latest", "Transcript Fetch"),
                 ("analyze_latest", "analyze_latest", "Transcript Analysis"),
+                ("synthesis", "synthesis", "Synthesis"),
+                ("generate_report", "pdf_report", "PDF Report"),
             ],
             "QoQ Concall Analysis": [
                 ("fetch_both", "fetch_both", "History Fetch"),
                 ("analyze_both", "analyze_both", "Analysis"),
                 ("compare_quarters", "compare_quarters", "Quarter Comparison"),
+                ("synthesis", "synthesis", "Synthesis"),
+                ("generate_report", "pdf_report", "PDF Report"),
             ],
             "Scuttlebutt Research": [
                 ("fetch_data", "fetch_data", "Financial Data Download"),
                 ("strategy_analysis", "strategy_analysis", "Strategy Analysis"),
                 ("risk_analysis", "risk_analysis", "Risk Analysis"),
                 ("scuttlebutt_analysis", "scuttlebutt_analysis", "Scuttlebutt Analysis"),
+                ("synthesis", "synthesis", "Synthesis"),
+                ("generate_report", "pdf_report", "PDF Report"),
             ],
         }
         for graph_node, placeholder_key, label in node_to_placeholder.get(workflow_mode, []):
@@ -422,6 +464,16 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                 if node_output:
                     final_state_result.update(node_output)
             
+            # Universal status updates for synthesis and report generation
+            if node_name == "synthesis":
+                if "synthesis" in placeholders:
+                    placeholders["synthesis"].markdown("✅ **Executive Synthesis Ready**")
+                if "pdf_report" in placeholders:
+                    placeholders["pdf_report"].markdown("⏳ **Generating PDF Report...**")
+            elif node_name == "generate_report":
+                if "pdf_report" in placeholders:
+                    placeholders["pdf_report"].markdown("✅ **PDF Report Ready**")
+
             # Update Status Indicators based on Mode
             if workflow_mode == "Risk Analysis Only":
                 if node_name == "screener_for_risk":
@@ -431,6 +483,7 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                     placeholders["isolated_risk"].markdown("⏳ **Generating Risk Profile...**")
                 elif node_name == "isolated_risk":
                     placeholders["isolated_risk"].markdown("✅ **Risk Analysis Complete**")
+                    placeholders["synthesis"].markdown("⏳ **Generating Executive Synthesis...**")
 
             elif workflow_mode == "Strategy Deep Dive":
                 if node_name == "screener_for_strategy":
@@ -448,17 +501,25 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                         
                 elif node_name == "isolated_strategy":
                     placeholders["isolated_strategy"].markdown("✅ **Strategy Analysis Complete**")
+                    placeholders["synthesis"].markdown("⏳ **Generating Executive Synthesis...**")
 
             elif workflow_mode == "Valuation & Governance Deep-Dive":
                 if node_name == "screener_for_valuation":
                     c_name = node_output.get("company_name", ticker_symbol)
                     progress_text_container.write(f"Fetching Peers for {ticker_symbol} ({c_name})...")
                     placeholders["screener_for_valuation"].markdown("✅ **Peer Data Retrieved**")
+                elif node_name == "quant_prereq":
+                    if "quant_prereq" in placeholders:
+                        placeholders["quant_prereq"].markdown("✅ **Quantitative Prereq Complete**")
+                elif node_name == "strategy_prereq":
+                    if "strategy_prereq" in placeholders:
+                        placeholders["strategy_prereq"].markdown("✅ **Strategy Prereq Complete**")
                     placeholders["isolated_valuation"].markdown("⏳ **Running Valuation Models...**")
                 elif node_name == "isolated_valuation":
                     placeholders["isolated_valuation"].markdown("✅ **Valuation Complete**")
+                    placeholders["synthesis"].markdown("⏳ **Generating Executive Synthesis...**")
 
-            elif workflow_mode == "Quantitative Deep-Dive": # <--- YOUR NEW INSERTION
+            elif workflow_mode == "Quantitative Deep-Dive":
                 if node_name == "screener_for_quant":
                     c_name = node_output.get("company_name", ticker_symbol)
                     progress_text_container.write(f"Fetching Data for {ticker_symbol} ({c_name})...")
@@ -466,6 +527,7 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                     placeholders["isolated_quant"].markdown("⏳ **Analyzing Financials & Generating Charts...**")
                 elif node_name == "isolated_quant":
                     placeholders["isolated_quant"].markdown("✅ **Quantitative Analysis Complete**")
+                    placeholders["synthesis"].markdown("⏳ **Generating Executive Synthesis...**")
 
             elif workflow_mode == "Qualitative Deep-Dive":
                 if node_name == "screener_for_qual":
@@ -482,6 +544,7 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                     
                 elif node_name == "isolated_qual":
                     placeholders["isolated_qual"].markdown("✅ **Qualitative Deep-Dive Complete**")
+                    placeholders["synthesis"].markdown("⏳ **Generating Executive Synthesis...**")
 
             elif workflow_mode == "SEBI Violations Check (MVP)":
                  if node_name == "screener_metadata":
@@ -491,6 +554,7 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                     placeholders["sebi_check"].markdown("⏳ **Searching SEBI Database...**")
                  elif node_name == "sebi_check":
                     placeholders["sebi_check"].markdown("✅ **Regulatory Check Complete**")
+                    placeholders["synthesis"].markdown("⏳ **Generating Executive Synthesis...**")
 
             elif workflow_mode == "Latest Concall Analysis":
                 if node_name == "fetch_latest":
@@ -500,6 +564,7 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                     placeholders["analyze_latest"].markdown("⏳ **Decoding Management Speak...**")
                 elif node_name == "analyze_latest":
                     placeholders["analyze_latest"].markdown("✅ **Analysis Complete**")
+                    placeholders["synthesis"].markdown("⏳ **Generating Executive Synthesis...**")
 
             elif workflow_mode == "QoQ Concall Analysis":
                 if node_name == "fetch_both":
@@ -512,6 +577,7 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                     placeholders["compare_quarters"].markdown("⏳ **Detecting Strategic Shifts...**")
                 elif node_name == "compare_quarters":
                     placeholders["compare_quarters"].markdown("✅ **Comparison Complete**")
+                    placeholders["synthesis"].markdown("⏳ **Generating Executive Synthesis...**")
             
             elif workflow_mode == "Scuttlebutt Research":
                 if node_name == "fetch_data":
@@ -527,6 +593,7 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                     placeholders["scuttlebutt_analysis"].markdown("⏳ **Gathering Intel (News/Forums)...**")
                 elif node_name == "scuttlebutt_analysis":
                     placeholders["scuttlebutt_analysis"].markdown("✅ **Research Complete**")
+                    placeholders["synthesis"].markdown("⏳ **Generating Executive Synthesis...**")
 
             else: # Full Workflow Updates
                 if node_name == "fetch_data":
@@ -547,13 +614,8 @@ def run_analysis_for_ticker(ticker_symbol, is_consolidated_flag, status_containe
                     placeholders["qual"].markdown("✅ **Qualitative Analysis Complete**")
                     placeholders["valuation"].markdown("⏳ **Running Valuation...**")
                 elif node_name == "valuation_analysis":
-                     placeholders["valuation"].markdown("✅ **Valuation Complete**")
-                     placeholders["synthesis"].markdown("⏳ **Generating Final Summary...**")
-                elif node_name == "synthesis":
-                     placeholders["synthesis"].markdown("✅ **Summary Generated**")
-                     placeholders["pdf_report"].markdown("⏳ **Generating PDF...**")
-                elif node_name == "generate_report":
-                     placeholders["pdf_report"].markdown("✅ **PDF Report Ready**")
+                    placeholders["valuation"].markdown("✅ **Valuation Complete**")
+                    placeholders["synthesis"].markdown("⏳ **Generating Final Summary...**")
 
     except Exception as _pool_exc:
         # If failure is psycopg_pool PoolTimeout (Neon cold-start hitting the first ticker),
@@ -646,9 +708,17 @@ resume_mode = st.sidebar.checkbox("🔄 Resume from checkpoint", value=False,
     help="Resume a previously interrupted run from its last completed step. Uses the same ticker + workflow to find the checkpoint.",
     disabled=(checkpointer is None))
 
-if st.sidebar.button("🗑️ Clear Results"):
-    st.session_state.analysis_results = {}
-    st.rerun()
+col_clear_res, col_clear_cp = st.sidebar.columns(2)
+with col_clear_res:
+    if st.button("🗑️ Clear Results", use_container_width=True):
+        st.session_state.analysis_results = {}
+        st.rerun()
+with col_clear_cp:
+    if st.button("🗑️ Clear DB Checkpoints", disabled=(checkpointer is None), use_container_width=True):
+        cleanup_all_checkpoints()
+        st.session_state.analysis_results = {}
+        st.sidebar.success("All checkpoints cleared from DB!")
+        st.rerun()
 
 # --- VALUATION SKILLS EDITOR ---
 from skills_loader import list_skills, read_skill, save_skill, create_skill, delete_skill
@@ -765,13 +835,9 @@ if st.sidebar.button("🚀 Run Analysis", type="primary"):
             
             progress_bar.progress((i + 1) / total_tickers)
 
-        # CLEANUP: Remove checkpoint data only for SUCCESSFUL runs
-        for ticker in tickers_to_process:
-            res = st.session_state.analysis_results.get(ticker, {})
-            # If the result suggests failure (or wasn't generated), SKIP cleanup so we can debug/resume
-            if "Analysis Failed" in str(res.get("final_report", "")) or not res:
-                continue
-            cleanup_checkpoint(ticker, workflow_mode)
+        # Checkpoints are intentionally preserved in Neon DB so that re-running
+        # with "Resume from checkpoint" can instantly skip completed tickers or resume failed ones.
+        # Checkpoints can be manually cleared via "Clear DB Checkpoints" in the sidebar.
         
         st.success("All requested analyses completed!")
         st.rerun()
@@ -780,7 +846,7 @@ if st.sidebar.button("🚀 Run Analysis", type="primary"):
 if st.session_state.analysis_results:
     st.divider()
 
-    # Batch Download (Only for Full Mode)
+    # Batch Download (Available for all modes with PDF reports)
     if len(st.session_state.analysis_results) > 0:
         zip_buffer = io.BytesIO()
         has_pdfs = False
@@ -817,6 +883,21 @@ if st.session_state.analysis_results:
         st.subheader(f"Results for: {company_display_name} ({run_mode})")
 
     # --- DISPLAY LOGIC BY MODE ---
+    # For individual agent modes, show PDF download button and Executive Synthesis
+    if run_mode != "Full Workflow (PDF Report)":
+        if final_state.get('pdf_report_bytes'):
+            clean_mode = run_mode.replace(' ', '_').replace('(', '').replace(')', '').replace('-', '_')
+            st.download_button(
+                label=f"📄 **Download PDF Report ({selected_ticker})**",
+                data=final_state['pdf_report_bytes'],
+                file_name=f"Report_{selected_ticker}_{clean_mode}.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+        if final_state.get('final_report'):
+            st.markdown("### 📝 Executive Synthesis & Analysis Summary")
+            st.markdown(final_state['final_report'])
+            st.divider()
     
     if run_mode == "Quantitative Deep-Dive":
         st.info("📊 **Quantitative Deep-Dive**: Sequential analysis of financial trends and performance charts.")
